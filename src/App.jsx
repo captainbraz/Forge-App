@@ -50,6 +50,13 @@ function computeVDOT(distMiles, timeMin) {
   const pctMax = 0.8 + 0.1894393 * Math.exp(-0.012778 * timeMin) + 0.2989558 * Math.exp(-0.1932605 * timeMin);
   return vo2 / pctMax;
 }
+function vo2MaxCategory(vdot) {
+  if (vdot < 30) return 'Beginner';
+  if (vdot < 40) return 'Recreational';
+  if (vdot < 50) return 'Trained';
+  if (vdot < 60) return 'Competitive';
+  return 'Elite';
+}
 function paceFromSeconds(sec) { const m = Math.floor(sec / 60); const s = Math.round(sec % 60); return `${m}:${s.toString().padStart(2, '0')}`; }
 function parseMinutesInput(val) {
   if (val === null || val === undefined || val === '') return null;
@@ -2090,6 +2097,19 @@ export default function HybridAthleteApp() {
               </div>
               <p className="text-[10px] text-zinc-600 mt-2">Updates automatically as you log those lifts.</p>
             </Card>
+            {profile.vdot && (
+              <Card>
+                <SectionHeader accent="teal">Endurance</SectionHeader>
+                <div className="flex items-center justify-between mt-2">
+                  <div>
+                    <div className="text-2xl font-bold font-mono text-teal-400">{profile.vdot.toFixed(1)}</div>
+                    <div className="text-[10px] text-zinc-500 uppercase">Estimated VO2 Max</div>
+                  </div>
+                  <div className="text-sm font-bold text-stone-300 uppercase tracking-wide">{vo2MaxCategory(profile.vdot)}</div>
+                </div>
+                <p className="text-[10px] text-zinc-600 mt-2">Estimated from your best entered race time. Roughly: &lt;30 beginner, 30-39 recreational, 40-49 trained, 50-59 competitive, 60+ elite.</p>
+              </Card>
+            )}
             <Card>
               <SectionHeader accent="teal">Training Setup</SectionHeader>
               <div className="space-y-1.5 mt-2 text-sm">
@@ -2617,6 +2637,15 @@ export default function HybridAthleteApp() {
                         <div className="grid grid-cols-2 gap-2 mt-3 pt-3 border-t border-zinc-700 text-center font-mono">
                           <div><div className="text-sm font-bold text-zinc-300">{runStats.avgWarmupPace || '—'}</div><div className="text-[10px] text-zinc-500 uppercase">avg warm-up pace</div></div>
                           <div><div className="text-sm font-bold text-zinc-300">{runStats.avgCooldownPace || '—'}</div><div className="text-[10px] text-zinc-500 uppercase">avg cooldown pace</div></div>
+                        </div>
+                      )}
+                      {profile.vdot && (
+                        <div className="mt-3 pt-3 border-t border-zinc-700 flex items-center justify-between">
+                          <div>
+                            <span className="text-lg font-bold font-mono text-teal-400">{profile.vdot.toFixed(1)}</span>
+                            <span className="text-[10px] text-zinc-500 uppercase ml-1.5">est. VO2 max</span>
+                          </div>
+                          <span className="text-xs font-bold text-stone-400 uppercase tracking-wide">{vo2MaxCategory(profile.vdot)}</span>
                         </div>
                       )}
                     </Card>
