@@ -477,12 +477,17 @@ function evaluateExerciseLog(exercise, log) {
   if (log.rpe == null) return null;
   const warmupOffset = exercise.needsWarmup ? 1 : 0;
   const workingWeights = [];
+  const workingReps = [];
   for (let i = warmupOffset; i < warmupOffset + exercise.sets; i++) {
     const s = log.sets[i];
-    if (s && s.done) { const w = Number(s.weight); if (!isNaN(w) && w > 0) workingWeights.push(w); }
+    if (s && s.done) {
+      const w = Number(s.weight); if (!isNaN(w) && w > 0) workingWeights.push(w);
+      const r = Number(s.reps); if (!isNaN(r) && r > 0) workingReps.push(r);
+    }
   }
   if (workingWeights.length === 0) return null;
   const avgWeight = workingWeights.reduce((a, b) => a + b, 0) / workingWeights.length;
+  const minReps = workingReps.length ? Math.min(...workingReps) : null;
   const fallbackMinReps = minRepsFromLabel(exercise.reps);
   const repsShortfall = log.sets.some((s, i) => {
     if (!s.done || s.reps === '') return false;
@@ -493,7 +498,19 @@ function evaluateExerciseLog(exercise, log) {
     return { direction: 'decrease', newWeight: Math.round((avgWeight * 0.93) / 5) * 5, reason: repsShortfall ? `Missed target reps at RPE ${log.rpe} last time.` : `RPE ${log.rpe} was near max effort — pulling back slightly.` };
   }
   if (log.rpe <= 6 && !repsShortfall) {
-    return { direction: 'increase', newWeight: Math.round((avgWeight * 1.04) / 5) * 5, reason: `RPE ${log.rpe} with all reps hit — ready for more.` };
+    const repHigh = exercise.repHigh;
+    const roundedWeight = Math.round((avgWeight * 1.04) / 5) * 5;
+    const atRepCeiling = repHigh != null && minReps != null && minReps >= repHigh;
+    // a real weight jump is available, or reps are already maxed out (no more room to progress via reps) -> bump weight
+    if (roundedWeight > avgWeight || atRepCeiling) {
+      const newWeight = roundedWeight > avgWeight ? roundedWeight : avgWeight + 5;
+      return { direction: 'increase', newWeight, reason: `RPE ${log.rpe} with all reps hit — ready for more.` };
+    }
+    // the weight math rounds back down to the same number — hold the weight and add a rep instead, if there's room in the rep range
+    if (repHigh != null && minReps != null && minReps < repHigh) {
+      return { direction: 'increase_reps', newReps: minReps + 1, reason: `RPE ${log.rpe} with all reps hit, but not quite enough to round up 5lb yet — try ${minReps + 1} reps at the same weight.` };
+    }
+    return { direction: 'increase', newWeight: roundedWeight, reason: `RPE ${log.rpe} with all reps hit — ready for more.` };
   }
   return null;
 }
@@ -946,8 +963,9 @@ function buildLiftTemplate(profile, oneRMs) {
   const family = splitFamilies[profile.splitType] || splitFamilies.full_body;
   const learnedOneRMs = profile.learnedOneRMs || {};
   const customExercises = profile.customExercises || [];
+  const liftDayTypes = profile.liftDayTypes || {};
   return liftDays.map((weekday, i) => {
-    const dayType = family.sequence[i % family.sequence.length];
+    const dayType = liftDayTypes[weekday] || family.sequence[i % family.sequence.length];
     const goal = dayTypeGoalOverride[dayType] || profile.strengthGoal;
     let exercises = buildDayExercises(dayType, i, { equipment: profile.equipment, goal, oneRMs, learnedOneRMs, customExercises });
     const budget = Number(profile.sessionLengthMin) || 60;
@@ -1064,6 +1082,35 @@ function expandToCalendar(profile, liftTemplate, runTemplate) {
     weeks.push({ weekIndex: w, monday: dateKey(addDays(monday, w * 7)), miles: mileageBlock[w], deload: w === 3, days });
   }
   return weeks;
+}
+// Rebuilds only not-yet-arrived days against updated training settings (split/schedule/goals/session length/etc),
+// leaving today and every already-logged/past day exactly as they were.
+function regenerateFuturePlan(nextProfile, calendar, todayStr) {
+  const lt = nextProfile.trainingMode !== 'running' ? buildLiftTemplate(nextProfile, nextProfile.oneRMs) : [];
+  const rt = nextProfile.trainingMode !== 'strength' ? buildRunTemplate(nextProfile) : [];
+  const freshCalendar = expandToCalendar(nextProfile, lt, rt);
+  return calendar.map((week, wi) => ({
+    ...week,
+    miles: freshCalendar[wi] ? freshCalendar[wi].miles : week.miles,
+    days: Object.fromEntries(Object.entries(week.days).map(([wd, entry]) => {
+      if (entry.date <= todayStr) return [wd, entry];
+      const freshEntry = freshCalendar[wi] && freshCalendar[wi].days[wd];
+      return [wd, freshEntry || entry];
+    }))
+  }));
+}
+function buildBlockRecord(profile, calendar) {
+  const allDates = calendar.flatMap(w => Object.values(w.days).map(d => d.date)).sort();
+  return {
+    startDate: allDates[0], endDate: allDates[allDates.length - 1],
+    splitType: profile.splitType, trainingMode: profile.trainingMode,
+    archivedAt: new Date().toISOString(), calendar
+  };
+}
+function buildFreshCalendarForProfile(profile) {
+  const lt = profile.trainingMode !== 'running' ? buildLiftTemplate(profile, profile.oneRMs) : [];
+  const rt = profile.trainingMode !== 'strength' ? buildRunTemplate(profile) : [];
+  return { lt, rt, calendar: expandToCalendar(profile, lt, rt) };
 }
 
 // ---------- workout logging helpers ----------
@@ -1362,6 +1409,14 @@ export default function HybridAthleteApp() {
   const [confirmRestart, setConfirmRestart] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
+  const [editingProfile, setEditingProfile] = useState(false);
+  const [showEditTrainingSetup, setShowEditTrainingSetup] = useState(false);
+  const [trainingSetupDraft, setTrainingSetupDraft] = useState(null);
+  const [showStartNewPlan, setShowStartNewPlan] = useState(false);
+  const [carryForwardData, setCarryForwardData] = useState(null);
+  const [showBlockHistory, setShowBlockHistory] = useState(false);
+  const [blockHistory, setBlockHistory] = useState([]);
+  const [profileDraft, setProfileDraft] = useState(null);
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [exerciseStats, setExerciseStats] = useState({});
@@ -1377,7 +1432,7 @@ export default function HybridAthleteApp() {
   const [form, setForm] = useState({
     name: '', sex: 'male', birthday: { month: 1, day: 1, year: new Date().getFullYear() - 30 }, weightLb: 170, heightIn: 70, activityLevel: 'moderate',
     trainingMode: 'hybrid', strengthGoal: 'hybrid', runGoal: 'general', experience: 'intermediate', equipment: 'barbell',
-    splitType: 'upper_lower', schedule: { ...emptySchedule }, sessionLengthMin: 60, runDayTypes: {},
+    splitType: 'upper_lower', schedule: { ...emptySchedule }, sessionLengthMin: 60, runDayTypes: {}, liftDayTypes: {},
     lifts: { squat: { weight: '', reps: '', since: currentMonthYear() }, bench: { weight: '', reps: '', since: currentMonthYear() }, deadlift: { weight: '', reps: '', since: currentMonthYear() }, ohp: { weight: '', reps: '', since: currentMonthYear() } },
     currentWeeklyMileage: 15, recentRaces: [{ distance: '5k', minutes: '', since: currentMonthYear() }],
     injuries: [], nutritionGoal: 'maintain'
@@ -1395,15 +1450,29 @@ export default function HybridAthleteApp() {
   useEffect(() => {
     (async () => {
       const p = await loadKey('profile');
-      const c = await loadKey('calendar');
-      const lt = await loadKey('liftTemplate');
+      let c = await loadKey('calendar');
+      let lt = await loadKey('liftTemplate');
       const f = await loadKey(todayKey());
       const sugg = await loadKey('suggestions');
+      const history = await loadKey('blockHistory');
+      if (history) setBlockHistory(history);
+      const todayStr0 = dateKey(new Date());
+      if (p && c) {
+        const allDates = c.flatMap(w => Object.values(w.days).map(d => d.date)).sort();
+        const lastDate = allDates[allDates.length - 1];
+        if (lastDate < todayStr0) {
+          // this block has run its course — archive it and seamlessly continue with a fresh one under the same settings
+          const nextHistory = [...(history || []), buildBlockRecord(p, c)];
+          setBlockHistory(nextHistory); await saveKey('blockHistory', nextHistory);
+          const fresh = buildFreshCalendarForProfile(p);
+          lt = fresh.lt; c = fresh.calendar;
+          await saveKey('calendar', c); await saveKey('liftTemplate', lt);
+        }
+      }
       setProfile(p); setCalendar(c); setLiftTemplate(lt);
       if (f) setTodayFood(f);
       if (sugg) setSuggestions(sugg);
       if (c) {
-        const todayStr0 = dateKey(new Date());
         let todayEntry0 = null;
         for (const w of c) { const found = Object.values(w.days).find(d => d.date === todayStr0); if (found) { todayEntry0 = found; break; } }
         if (todayEntry0 && (todayEntry0.lift || todayEntry0.run)) {
@@ -1439,6 +1508,59 @@ export default function HybridAthleteApp() {
     setRunStats(aggregateRunStats(logs, profile));
     setHistoryLoaded(true);
     setHistoryLoading(false);
+  }
+  async function seedOneRMsFromRecentLogs(days = 30) {
+    const keys = await listKeys('log:');
+    const cutoff = dateKey(addDays(new Date(), -days));
+    const primaryNames = { squat: 'Back Squat', bench: 'Barbell Bench Press', deadlift: 'Trap Bar Deadlift', ohp: 'Seated Barbell Shoulder Press' };
+    const best = { squat: null, bench: null, deadlift: null, ohp: null };
+    for (const key of keys) {
+      const dateStr = key.slice(4);
+      if (dateStr < cutoff) continue;
+      const log = await loadKey(key);
+      if (!log) continue;
+      const allExLogs = [...Object.values(log.lift || {}), ...(log.independentLift || [])];
+      allExLogs.forEach(exLog => {
+        const name = exLog.swappedName || exLog.name;
+        Object.entries(primaryNames).forEach(([liftKey, exName]) => {
+          if (name !== exName) return;
+          const rm = bestOneRMFromSets(exLog.sets);
+          if (rm && (!best[liftKey] || rm > best[liftKey])) best[liftKey] = rm;
+        });
+      });
+    }
+    return best;
+  }
+  async function startNewPlan(mode) {
+    if (calendar) {
+      const nextHistory = [...blockHistory, buildBlockRecord(profile, calendar)];
+      setBlockHistory(nextHistory); await saveKey('blockHistory', nextHistory);
+    }
+    let carriedOneRMs = profile.oneRMs;
+    if (mode === 'recent') {
+      const recent = await seedOneRMsFromRecentLogs(30);
+      carriedOneRMs = {
+        squat: recent.squat || profile.oneRMs?.squat || null,
+        bench: recent.bench || profile.oneRMs?.bench || null,
+        deadlift: recent.deadlift || profile.oneRMs?.deadlift || null,
+        ohp: recent.ohp || profile.oneRMs?.ohp || null
+      };
+    }
+    setCarryForwardData({ oneRMs: carriedOneRMs, learnedOneRMs: profile.learnedOneRMs || {}, customExercises: profile.customExercises || [] });
+    setForm({
+      ...form,
+      name: profile.name, sex: profile.sex, birthday: profile.birthday, weightLb: profile.weightLb, heightIn: profile.heightIn, activityLevel: profile.activityLevel,
+      trainingMode: profile.trainingMode, strengthGoal: profile.strengthGoal, runGoal: profile.runGoal, experience: profile.experience, equipment: profile.equipment,
+      splitType: profile.splitType, schedule: { ...profile.schedule }, sessionLengthMin: profile.sessionLengthMin, runDayTypes: { ...profile.runDayTypes }, liftDayTypes: profile.liftDayTypes || {},
+      currentWeeklyMileage: profile.currentWeeklyMileage, nutritionGoal: profile.nutritionGoal
+    });
+    setProfile(null);
+    setCalendar(null);
+    setShowStartNewPlan(false);
+    setShowSplash(false);
+    setSetupStep(0);
+    setHistoryLoaded(false); setExerciseStats({}); setRunStats(null);
+    saveKey('profile', null); saveKey('calendar', null);
   }
   async function exportAllData() {
     setExporting(true);
@@ -1620,6 +1742,35 @@ export default function HybridAthleteApp() {
     const nextCalendar = recalculateFutureWeights(calendar, nextProfile, todayStr);
     setCalendar(nextCalendar); saveKey('calendar', nextCalendar);
     return nextProfile;
+  }
+  function startEditingProfile() {
+    setProfileDraft({
+      name: profile.name, sex: profile.sex, birthday: profile.birthday, weightLb: profile.weightLb,
+      heightIn: profile.heightIn, activityLevel: profile.activityLevel, nutritionGoal: profile.nutritionGoal
+    });
+    setEditingProfile(true);
+  }
+  function saveProfileEdits() {
+    const nextProfile = { ...profile, ...profileDraft };
+    setProfile(nextProfile); saveKey('profile', nextProfile);
+    setEditingProfile(false);
+    setProfileDraft(null);
+  }
+  function startEditingTrainingSetup() {
+    setTrainingSetupDraft({
+      strengthGoal: profile.strengthGoal, runGoal: profile.runGoal, equipment: profile.equipment,
+      splitType: profile.splitType, liftDayTypes: profile.liftDayTypes || {}, sessionLengthMin: profile.sessionLengthMin,
+      schedule: { ...profile.schedule }, runDayTypes: { ...profile.runDayTypes }, currentWeeklyMileage: profile.currentWeeklyMileage
+    });
+    setShowEditTrainingSetup(true);
+  }
+  function saveTrainingSetupEdits() {
+    const nextProfile = { ...profile, ...trainingSetupDraft };
+    const nextCalendar = regenerateFuturePlan(nextProfile, calendar, todayStr);
+    setProfile(nextProfile); saveKey('profile', nextProfile);
+    setCalendar(nextCalendar); saveKey('calendar', nextCalendar);
+    setShowEditTrainingSetup(false);
+    setTrainingSetupDraft(null);
   }
   function setExerciseRpe(ex, n) {
     const nextExLog = { ...dayLog.lift[ex.id], rpe: n };
@@ -1883,6 +2034,20 @@ export default function HybridAthleteApp() {
     setCalendar(nextCalendar); saveKey('calendar', nextCalendar);
     dismissSuggestion(exId);
   }
+  function applyRepSuggestion(exId, newReps, fromDate) {
+    const nextCalendar = calendar.map(week => ({
+      ...week,
+      days: Object.fromEntries(Object.entries(week.days).map(([wd, entry]) => {
+        if (entry.lift && entry.date > fromDate) {
+          const exercises = entry.lift.exercises.map(ex => ex.id === exId ? { ...ex, repLow: newReps, reps: repsDisplay(newReps, ex.repHigh) } : ex);
+          return [wd, { ...entry, lift: { ...entry.lift, exercises } }];
+        }
+        return [wd, entry];
+      }))
+    }));
+    setCalendar(nextCalendar); saveKey('calendar', nextCalendar);
+    dismissSuggestion(exId);
+  }
   function applyRunSuggestion(key, newDistance, fromDate) {
     const paces = computePaces(profile);
     const easyPaceMinPerMile = paces ? paceStrToMinutes(paces.easy) : 10;
@@ -1943,10 +2108,15 @@ export default function HybridAthleteApp() {
   }
 
   function handleBuildPlan() {
-    const oneRMs = includesStrength ? buildOneRMs() : { squat: null, bench: null, deadlift: null, ohp: null };
+    const computedOneRMs = includesStrength ? buildOneRMs() : { squat: null, bench: null, deadlift: null, ohp: null };
+    const oneRMs = carryForwardData ? { ...computedOneRMs, ...carryForwardData.oneRMs } : computedOneRMs;
     const bestRace = includesRunning ? bestRaceEstimate(form.recentRaces) : null;
     const vdot = bestRace ? computeVDOT(DIST_MILES[bestRace.distance], parseMinutesInput(bestRace.minutes)) : null;
-    const p = { ...form, oneRMs, vdot, learnedOneRMs: {}, customExercises: [] };
+    const p = {
+      ...form, oneRMs, vdot,
+      learnedOneRMs: carryForwardData ? carryForwardData.learnedOneRMs : {},
+      customExercises: carryForwardData ? carryForwardData.customExercises : []
+    };
     const lt = includesStrength ? buildLiftTemplate(p, oneRMs) : [];
     const rt = includesRunning ? buildRunTemplate(p) : [];
     const conf = detectConflicts(lt, form.injuries);
@@ -1967,6 +2137,7 @@ export default function HybridAthleteApp() {
     setProfile(p); setLiftTemplate(lt); setCalendar(cal);
     saveKey('profile', p); saveKey('liftTemplate', lt); saveKey('calendar', cal);
     setReviewing(false);
+    setCarryForwardData(null);
   }
 
   function addInjury() { const now = new Date(); setForm({ ...form, injuries: [...form.injuries, { area: 'Knee', status: 'current', since: { month: now.getMonth() + 1, year: now.getFullYear() }, notes: '' }] }); }
@@ -2049,7 +2220,7 @@ export default function HybridAthleteApp() {
   const foodTotals = useMemo(() => todayFood.reduce((acc, f) => ({ kcal: acc.kcal + f.kcal, protein: acc.protein + f.protein, carbs: acc.carbs + f.carbs, fat: acc.fat + f.fat }), { kcal: 0, protein: 0, carbs: 0, fat: 0 }), [todayFood]);
 
   const weekLoad = useMemo(() => {
-    if (!calendar) return null;
+    if (!calendar || !profile) return null;
     const week = calendar[Math.min(weekIndex, calendar.length - 1)];
     const loads = {};
     WEEKDAYS.forEach(d => {
@@ -2232,7 +2403,7 @@ export default function HybridAthleteApp() {
               {includesStrength && (
                 <>
                   <Field label={`Split (${liftDayCount} lift day${liftDayCount === 1 ? '' : 's'}/wk)`}>
-                    <select value={form.splitType} onChange={e => setForm({ ...form, splitType: e.target.value })} className={inputCls}>
+                    <select value={form.splitType} onChange={e => setForm({ ...form, splitType: e.target.value, liftDayTypes: {} })} className={inputCls}>
                       {Object.entries(splitFamilies).filter(([, f]) => !f.onlyForDayCount || f.onlyForDayCount === liftDayCount).map(([id, f]) => <option key={id} value={id}>{f.label}</option>)}
                     </select>
                   </Field>
@@ -2240,6 +2411,26 @@ export default function HybridAthleteApp() {
                     <p className="text-xs text-zinc-400 mb-1">Lifting session length (min) — running is separate and sized to the prescribed run</p>
                     <WheelPicker value={Number(form.sessionLengthMin)} onChange={v => setForm({ ...form, sessionLengthMin: v })} options={numRange(20, 150, 5)} />
                   </div>
+                  {liftDayCount > 0 && (() => {
+                    const sequence = (splitFamilies[form.splitType] || splitFamilies.full_body).sequence;
+                    const liftWeekdays = WEEKDAYS.filter(d => form.schedule[d] === 'lift' || form.schedule[d] === 'lift_run');
+                    return (
+                      <div>
+                        <SectionHeader accent="amber">Lift day order</SectionHeader>
+                        <p className="text-xs text-zinc-500 mt-1 mb-2">Assign which split day falls on which weekday — defaults to the split's natural order.</p>
+                        <div className="space-y-1.5">
+                          {liftWeekdays.map((d, i) => (
+                            <div key={d} className="flex items-center justify-between">
+                              <span className="text-xs font-mono w-10">{d}</span>
+                              <select value={form.liftDayTypes[d] || sequence[i % sequence.length]} onChange={e => setForm({ ...form, liftDayTypes: { ...form.liftDayTypes, [d]: e.target.value } })} className="flex-1 ml-2 bg-zinc-800 border border-zinc-700 rounded px-2 py-1.5 text-sm">
+                                {sequence.map(dt => <option key={dt} value={dt}>{dt}</option>)}
+                              </select>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </>
               )}
               {includesRunning && runDayCount > 0 && (
@@ -2438,14 +2629,64 @@ export default function HybridAthleteApp() {
           </div>
           <div className="space-y-3">
             <Card>
-              <SectionHeader>About</SectionHeader>
-              <div className="grid grid-cols-2 gap-y-1.5 mt-2 text-sm">
-                {profile.name && <div className="col-span-2"><span className="text-zinc-500">Name</span> · {profile.name}</div>}
-                <div><span className="text-zinc-500">Age</span> · {currentAge != null ? currentAge : '—'}</div>
-                <div><span className="text-zinc-500">Weight</span> · {profile.weightLb} lb</div>
-                <div><span className="text-zinc-500">Height</span> · {Math.floor(profile.heightIn / 12)}'{profile.heightIn % 12}"</div>
-                <div><span className="text-zinc-500">Activity</span> · {ACTIVITY_LABELS[profile.activityLevel] || profile.activityLevel}</div>
+              <div className="flex items-center justify-between">
+                <SectionHeader>About</SectionHeader>
+                {!editingProfile && <button onClick={startEditingProfile} className="text-[11px] font-bold text-teal-400 uppercase tracking-wide">Edit</button>}
               </div>
+              {editingProfile ? (
+                <div className="space-y-3 mt-2">
+                  <Field label="Name"><input value={profileDraft.name} onChange={e => setProfileDraft({ ...profileDraft, name: e.target.value })} className={inputCls} /></Field>
+                  <Field label="Sex"><select value={profileDraft.sex} onChange={e => setProfileDraft({ ...profileDraft, sex: e.target.value })} className={inputCls}><option value="male">Male</option><option value="female">Female</option></select></Field>
+                  <div>
+                    <p className="text-xs text-zinc-400 mb-1">Birthday</p>
+                    <div className="flex gap-2 bg-zinc-800 border border-zinc-700 rounded">
+                      <WheelPicker value={profileDraft.birthday.month} onChange={v => setProfileDraft({ ...profileDraft, birthday: { ...profileDraft.birthday, month: v } })} options={monthOptions()} />
+                      <div className="w-px bg-zinc-700" />
+                      <WheelPicker value={profileDraft.birthday.day} onChange={v => setProfileDraft({ ...profileDraft, birthday: { ...profileDraft.birthday, day: v } })} options={numRange(1, 31)} />
+                      <div className="w-px bg-zinc-700" />
+                      <WheelPicker value={profileDraft.birthday.year} onChange={v => setProfileDraft({ ...profileDraft, birthday: { ...profileDraft.birthday, year: v } })} options={yearOptions(90)} />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <p className="text-xs text-zinc-400 mb-1">Weight (lb)</p>
+                      <WheelPicker value={Number(profileDraft.weightLb)} onChange={v => setProfileDraft({ ...profileDraft, weightLb: v })} options={numRange(70, 400)} />
+                    </div>
+                    <div>
+                      <p className="text-xs text-zinc-400 mb-1">Height</p>
+                      <DualWheelPicker
+                        leftLabel="ft" rightLabel="in"
+                        leftOptions={numRange(3, 7)} rightOptions={numRange(0, 11)}
+                        leftValue={Math.floor(Number(profileDraft.heightIn) / 12)} rightValue={Number(profileDraft.heightIn) % 12}
+                        onLeftChange={ft => setProfileDraft({ ...profileDraft, heightIn: ft * 12 + (Number(profileDraft.heightIn) % 12) })}
+                        onRightChange={inch => setProfileDraft({ ...profileDraft, heightIn: Math.floor(Number(profileDraft.heightIn) / 12) * 12 + inch })}
+                      />
+                    </div>
+                  </div>
+                  <Field label="Daily activity outside training">
+                    <select value={profileDraft.activityLevel} onChange={e => setProfileDraft({ ...profileDraft, activityLevel: e.target.value })} className={inputCls}>
+                      <option value="sedentary">Sedentary</option><option value="light">Light</option><option value="moderate">Moderate</option><option value="active">Active</option><option value="veryActive">Very active</option>
+                    </select>
+                  </Field>
+                  <Field label="Nutrition goal">
+                    <select value={profileDraft.nutritionGoal} onChange={e => setProfileDraft({ ...profileDraft, nutritionGoal: e.target.value })} className={inputCls}>
+                      <option value="maintain">Maintain</option><option value="cut">Cut (fat loss)</option><option value="bulk">Bulk (mass gain)</option>
+                    </select>
+                  </Field>
+                  <div className="flex gap-2">
+                    <button onClick={() => { setEditingProfile(false); setProfileDraft(null); }} className="flex-1 py-2 rounded bg-zinc-800 border border-zinc-700 text-xs font-bold uppercase tracking-wide">Cancel</button>
+                    <button onClick={saveProfileEdits} className="flex-1 py-2 rounded bg-teal-500 text-zinc-900 text-xs font-bold uppercase tracking-wide">Save</button>
+                  </div>
+                </div>
+              ) : (
+                <div className="grid grid-cols-2 gap-y-1.5 mt-2 text-sm">
+                  {profile.name && <div className="col-span-2"><span className="text-zinc-500">Name</span> · {profile.name}</div>}
+                  <div><span className="text-zinc-500">Age</span> · {currentAge != null ? currentAge : '—'}</div>
+                  <div><span className="text-zinc-500">Weight</span> · {profile.weightLb} lb</div>
+                  <div><span className="text-zinc-500">Height</span> · {Math.floor(profile.heightIn / 12)}'{profile.heightIn % 12}"</div>
+                  <div><span className="text-zinc-500">Activity</span> · {ACTIVITY_LABELS[profile.activityLevel] || profile.activityLevel}</div>
+                </div>
+              )}
             </Card>
             <Card>
               <SectionHeader accent="amber">Main Lift Records</SectionHeader>
@@ -2503,6 +2744,169 @@ export default function HybridAthleteApp() {
     );
   }
 
+  if (profile && showEditTrainingSetup && trainingSetupDraft) {
+    const includesStrengthEdit = profile.trainingMode === 'hybrid' || profile.trainingMode === 'strength';
+    const includesRunningEdit = profile.trainingMode === 'hybrid' || profile.trainingMode === 'running';
+    const draftLiftDayCount = WEEKDAYS.filter(d => trainingSetupDraft.schedule[d] === 'lift' || trainingSetupDraft.schedule[d] === 'lift_run').length;
+    const draftRunDayCount = WEEKDAYS.filter(d => trainingSetupDraft.schedule[d] === 'run' || trainingSetupDraft.schedule[d] === 'lift_run').length;
+    const draftScheduleOptions = profile.trainingMode === 'strength' ? [['rest', 'Rest'], ['active_recovery', 'Active recovery'], ['lift', 'Lift']]
+      : profile.trainingMode === 'running' ? [['rest', 'Rest'], ['active_recovery', 'Active recovery'], ['run', 'Run']]
+      : [['rest', 'Rest'], ['active_recovery', 'Active recovery'], ['lift', 'Lift'], ['run', 'Run'], ['lift_run', 'Lift + Run']];
+    const draftSequence = (splitFamilies[trainingSetupDraft.splitType] || splitFamilies.full_body).sequence;
+    const draftLiftWeekdays = WEEKDAYS.filter(d => trainingSetupDraft.schedule[d] === 'lift' || trainingSetupDraft.schedule[d] === 'lift_run');
+    function updateDraftSchedule(day, val) {
+      const nextSchedule = { ...trainingSetupDraft.schedule, [day]: val };
+      const runDays = WEEKDAYS.filter(d => nextSchedule[d] === 'run' || nextSchedule[d] === 'lift_run');
+      const nextRunDayTypes = {};
+      runDays.forEach(d => { nextRunDayTypes[d] = trainingSetupDraft.runDayTypes[d] || 'Easy'; });
+      setTrainingSetupDraft({ ...trainingSetupDraft, schedule: nextSchedule, runDayTypes: nextRunDayTypes });
+    }
+    return (
+      <div className="min-h-screen bg-zinc-900 text-stone-100 p-4">
+        <div className="max-w-sm mx-auto">
+          <div className="flex items-center justify-between mb-1">
+            <h1 className="text-lg font-black uppercase tracking-widest">Edit training setup</h1>
+          </div>
+          <p className="text-xs text-zinc-500 mb-4">Changes only affect today onward — anything already logged stays exactly as it was.</p>
+          <div className="space-y-3">
+            {includesStrengthEdit && (
+              <Card>
+                <SectionHeader accent="amber">Strength</SectionHeader>
+                <div className="space-y-3 mt-2">
+                  <Field label="Strength goal">
+                    <select value={trainingSetupDraft.strengthGoal} onChange={e => setTrainingSetupDraft({ ...trainingSetupDraft, strengthGoal: e.target.value })} className={inputCls}>
+                      <option value="strength">Max strength</option><option value="hypertrophy">Hypertrophy</option><option value="hybrid">Hybrid support</option>
+                    </select>
+                  </Field>
+                  <Field label="Equipment">
+                    <select value={trainingSetupDraft.equipment} onChange={e => setTrainingSetupDraft({ ...trainingSetupDraft, equipment: e.target.value })} className={inputCls}>
+                      <option value="barbell">Full gym / barbell</option><option value="dumbbell">Dumbbells only</option><option value="bodyweight">Bodyweight only</option>
+                    </select>
+                  </Field>
+                  <Field label={`Split (${draftLiftDayCount} lift day${draftLiftDayCount === 1 ? '' : 's'}/wk)`}>
+                    <select value={trainingSetupDraft.splitType} onChange={e => setTrainingSetupDraft({ ...trainingSetupDraft, splitType: e.target.value, liftDayTypes: {} })} className={inputCls}>
+                      {Object.entries(splitFamilies).filter(([, f]) => !f.onlyForDayCount || f.onlyForDayCount === draftLiftDayCount).map(([id, f]) => <option key={id} value={id}>{f.label}</option>)}
+                    </select>
+                  </Field>
+                  <div>
+                    <p className="text-xs text-zinc-400 mb-1">Lifting session length (min)</p>
+                    <WheelPicker value={Number(trainingSetupDraft.sessionLengthMin)} onChange={v => setTrainingSetupDraft({ ...trainingSetupDraft, sessionLengthMin: v })} options={numRange(20, 150, 5)} />
+                  </div>
+                </div>
+              </Card>
+            )}
+            {includesRunningEdit && (
+              <Card>
+                <SectionHeader accent="teal">Running</SectionHeader>
+                <div className="space-y-3 mt-2">
+                  <Field label="Running focus">
+                    <select value={trainingSetupDraft.runGoal} onChange={e => setTrainingSetupDraft({ ...trainingSetupDraft, runGoal: e.target.value })} className={inputCls}>
+                      <option value="5k">5K</option><option value="10k">10K</option><option value="half">Half marathon</option><option value="marathon">Marathon</option><option value="general">General endurance</option>
+                    </select>
+                  </Field>
+                  <Field label="Current weekly mileage"><input type="number" value={trainingSetupDraft.currentWeeklyMileage} onChange={e => setTrainingSetupDraft({ ...trainingSetupDraft, currentWeeklyMileage: e.target.value })} className={inputCls} /></Field>
+                </div>
+              </Card>
+            )}
+            <Card>
+              <SectionHeader>Schedule</SectionHeader>
+              <p className="text-xs text-zinc-500 mt-1 mb-2">Tap each day to reassign it.</p>
+              <div className="space-y-1.5">
+                {WEEKDAYS.map(d => (
+                  <div key={d} className="flex items-center justify-between">
+                    <span className="text-xs font-mono w-10">{d}</span>
+                    <select value={trainingSetupDraft.schedule[d]} onChange={e => updateDraftSchedule(d, e.target.value)} className="flex-1 ml-2 bg-zinc-800 border border-zinc-700 rounded px-2 py-1.5 text-sm">
+                      {draftScheduleOptions.map(([val, label]) => <option key={val} value={val}>{label}</option>)}
+                    </select>
+                  </div>
+                ))}
+              </div>
+            </Card>
+            {includesStrengthEdit && draftLiftDayCount > 0 && (
+              <Card>
+                <SectionHeader accent="amber">Lift day order</SectionHeader>
+                <p className="text-xs text-zinc-500 mt-1 mb-2">Assign which split day falls on which weekday.</p>
+                <div className="space-y-1.5">
+                  {draftLiftWeekdays.map((d, i) => (
+                    <div key={d} className="flex items-center justify-between">
+                      <span className="text-xs font-mono w-10">{d}</span>
+                      <select value={trainingSetupDraft.liftDayTypes[d] || draftSequence[i % draftSequence.length]} onChange={e => setTrainingSetupDraft({ ...trainingSetupDraft, liftDayTypes: { ...trainingSetupDraft.liftDayTypes, [d]: e.target.value } })} className="flex-1 ml-2 bg-zinc-800 border border-zinc-700 rounded px-2 py-1.5 text-sm">
+                        {draftSequence.map(dt => <option key={dt} value={dt}>{dt}</option>)}
+                      </select>
+                    </div>
+                  ))}
+                </div>
+              </Card>
+            )}
+            {includesRunningEdit && draftRunDayCount > 0 && (
+              <Card>
+                <SectionHeader accent="teal">Run day types</SectionHeader>
+                <div className="space-y-1.5 mt-2">
+                  {WEEKDAYS.filter(d => trainingSetupDraft.schedule[d] === 'run' || trainingSetupDraft.schedule[d] === 'lift_run').map(d => (
+                    <div key={d} className="flex items-center justify-between">
+                      <span className="text-xs font-mono w-10">{d}</span>
+                      <select value={trainingSetupDraft.runDayTypes[d] || 'Easy'} onChange={e => setTrainingSetupDraft({ ...trainingSetupDraft, runDayTypes: { ...trainingSetupDraft.runDayTypes, [d]: e.target.value } })} className="flex-1 ml-2 bg-zinc-800 border border-zinc-700 rounded px-2 py-1.5 text-sm">
+                        <option value="Long">Long</option><option value="Quality">Quality</option><option value="Tempo">Tempo</option><option value="Easy">Easy</option>
+                      </select>
+                    </div>
+                  ))}
+                </div>
+              </Card>
+            )}
+            <div className="flex gap-2 pb-4">
+              <button onClick={() => { setShowEditTrainingSetup(false); setTrainingSetupDraft(null); }} className="flex-1 py-2 rounded bg-zinc-800 border border-zinc-700 text-sm font-bold uppercase tracking-wide">Cancel</button>
+              <button onClick={saveTrainingSetupEdits} className="flex-1 py-2 rounded bg-teal-500 text-zinc-900 text-sm font-bold uppercase tracking-wide">Save changes</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (profile && showStartNewPlan) {
+    return (
+      <div className="min-h-screen bg-zinc-900 text-stone-100 p-4 flex items-center justify-center">
+        <div className="max-w-xs w-full">
+          <h1 className="text-lg font-black uppercase tracking-widest mb-2">Start new plan</h1>
+          <p className="text-xs text-zinc-400 mb-1">Your current 4-week block will be archived (viewable under "Past blocks") and replaced with a new one. Nothing you've logged is deleted — your workout history stays exactly as it is.</p>
+          <p className="text-xs text-amber-400 mb-4">The active plan itself can't be recovered once replaced — you'll go back through setup to build the new one.</p>
+          <div className="space-y-2">
+            <button onClick={() => startNewPlan('scratch')} className="w-full py-2.5 rounded bg-teal-500 text-zinc-900 text-sm font-bold uppercase tracking-wide">Keep my current lift maxes</button>
+            <button onClick={() => startNewPlan('recent')} className="w-full py-2.5 rounded bg-amber-500 text-zinc-900 text-sm font-bold uppercase tracking-wide">Reseed from my last 30 days</button>
+            <button onClick={() => setShowStartNewPlan(false)} className="w-full py-2.5 rounded bg-zinc-800 border border-zinc-700 text-sm font-bold uppercase tracking-wide">Cancel</button>
+          </div>
+          <p className="text-[10px] text-zinc-600 mt-3">Either way, your name, age, height, weight, and custom exercises carry over — you'll review everything again in setup before it's final.</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (showBlockHistory) {
+    return (
+      <div className="min-h-screen bg-zinc-900 text-stone-100 p-4">
+        <div className="max-w-sm mx-auto">
+          <div className="flex items-center justify-between mb-4">
+            <h1 className="text-lg font-black uppercase tracking-widest">Past blocks</h1>
+            <button onClick={() => setShowBlockHistory(false)} className="text-sm font-bold text-teal-400 uppercase tracking-wide">Done</button>
+          </div>
+          {blockHistory.length === 0 ? (
+            <p className="text-sm text-zinc-500">No finished blocks yet — this fills in once you complete or replace a 4-week plan.</p>
+          ) : (
+            <div className="space-y-2">
+              {[...blockHistory].reverse().map((b, i) => (
+                <Card key={i}>
+                  <p className="text-sm font-bold">{b.startDate} → {b.endDate}</p>
+                  <p className="text-xs text-zinc-500 capitalize mt-0.5">{splitFamilies[b.splitType]?.label || b.splitType} · {b.trainingMode}</p>
+                </Card>
+              ))}
+            </div>
+          )}
+          <p className="text-[11px] text-zinc-600 mt-4">This is a record of the plan structure for each finished block. Your actual logged workouts aren't tied to a block — they're always visible in Stats regardless of which block they happened in.</p>
+        </div>
+      </div>
+    );
+  }
+
   // ---------- main app ----------
   const week = calendar[Math.min(weekIndex, calendar.length - 1)];
   return (
@@ -2521,7 +2925,10 @@ export default function HybridAthleteApp() {
             {showSettingsMenu && (
               <div className="absolute right-0 top-8 z-20 w-48 bg-zinc-800 border border-zinc-700 rounded-lg shadow-xl overflow-hidden">
                 <button onClick={() => { setShowSettingsMenu(false); setShowInjuryManager(true); }} className="w-full text-left px-3 py-2.5 text-sm hover:bg-zinc-700">Manage injuries</button>
+                <button onClick={() => { setShowSettingsMenu(false); startEditingTrainingSetup(); }} className="w-full text-left px-3 py-2.5 text-sm hover:bg-zinc-700 border-t border-zinc-700">Edit training setup</button>
                 <button onClick={() => { setShowSettingsMenu(false); exportAllData(); }} disabled={exporting} className="w-full text-left px-3 py-2.5 text-sm hover:bg-zinc-700 border-t border-zinc-700">{exporting ? 'Exporting...' : 'Export my data'}</button>
+                <button onClick={() => { setShowSettingsMenu(false); setShowBlockHistory(true); }} className="w-full text-left px-3 py-2.5 text-sm hover:bg-zinc-700 border-t border-zinc-700">Past blocks{blockHistory.length > 0 ? ` (${blockHistory.length})` : ''}</button>
+                <button onClick={() => { setShowSettingsMenu(false); setShowStartNewPlan(true); }} className="w-full text-left px-3 py-2.5 text-sm text-amber-400 hover:bg-zinc-700 border-t border-zinc-700">Start new plan</button>
                 <button onClick={() => { setShowSettingsMenu(false); setConfirmRestart(true); }} className="w-full text-left px-3 py-2.5 text-sm text-orange-400 hover:bg-zinc-700 border-t border-zinc-700">Restart full setup</button>
               </div>
             )}
@@ -2802,11 +3209,11 @@ export default function HybridAthleteApp() {
                                       {showSugg && (
                                         <div className="mt-1 bg-zinc-900 border border-amber-600/40 rounded px-2 py-1.5 flex items-center justify-between gap-2">
                                           <div>
-                                            <p className="text-[11px] text-amber-400 font-bold">{sugg.direction === 'increase' ? '↑' : '↓'} Suggested: {sugg.newWeight}lb</p>
+                                            <p className="text-[11px] text-amber-400 font-bold">{sugg.direction === 'decrease' ? '↓' : '↑'} Suggested: {sugg.direction === 'increase_reps' ? `${sugg.newReps} reps` : `${sugg.newWeight}lb`}</p>
                                             <p className="text-[10px] text-zinc-500">{sugg.reason}</p>
                                           </div>
                                           <div className="flex gap-1 shrink-0">
-                                            <button onClick={() => applyExerciseSuggestion(ex.id, sugg.newWeight, sugg.fromDate)} className="text-[10px] bg-amber-500 text-zinc-900 rounded px-2 py-1 font-bold uppercase">Apply</button>
+                                            <button onClick={() => sugg.direction === 'increase_reps' ? applyRepSuggestion(ex.id, sugg.newReps, sugg.fromDate) : applyExerciseSuggestion(ex.id, sugg.newWeight, sugg.fromDate)} className="text-[10px] bg-amber-500 text-zinc-900 rounded px-2 py-1 font-bold uppercase">Apply</button>
                                             <button onClick={() => dismissSuggestion(ex.id)} className="text-[10px] bg-zinc-700 text-zinc-300 rounded px-2 py-1 font-bold uppercase">Dismiss</button>
                                           </div>
                                         </div>
@@ -2843,11 +3250,11 @@ export default function HybridAthleteApp() {
                                       {suggestions[ex.id] && entry.date > suggestions[ex.id].fromDate && (
                                         <div className="mt-1.5 bg-zinc-800 border border-amber-600/40 rounded px-2 py-1.5 flex items-center justify-between gap-2">
                                           <div>
-                                            <p className="text-[11px] text-amber-400 font-bold">{suggestions[ex.id].direction === 'increase' ? '↑' : '↓'} Suggested: {suggestions[ex.id].newWeight}lb</p>
+                                            <p className="text-[11px] text-amber-400 font-bold">{suggestions[ex.id].direction === 'decrease' ? '↓' : '↑'} Suggested: {suggestions[ex.id].direction === 'increase_reps' ? `${suggestions[ex.id].newReps} reps` : `${suggestions[ex.id].newWeight}lb`}</p>
                                             <p className="text-[10px] text-zinc-500">{suggestions[ex.id].reason}</p>
                                           </div>
                                           <div className="flex gap-1 shrink-0">
-                                            <button onClick={() => applyExerciseSuggestion(ex.id, suggestions[ex.id].newWeight, suggestions[ex.id].fromDate)} className="text-[10px] bg-amber-500 text-zinc-900 rounded px-2 py-1 font-bold uppercase">Apply</button>
+                                            <button onClick={() => suggestions[ex.id].direction === 'increase_reps' ? applyRepSuggestion(ex.id, suggestions[ex.id].newReps, suggestions[ex.id].fromDate) : applyExerciseSuggestion(ex.id, suggestions[ex.id].newWeight, suggestions[ex.id].fromDate)} className="text-[10px] bg-amber-500 text-zinc-900 rounded px-2 py-1 font-bold uppercase">Apply</button>
                                             <button onClick={() => dismissSuggestion(ex.id)} className="text-[10px] bg-zinc-700 text-zinc-300 rounded px-2 py-1 font-bold uppercase">Dismiss</button>
                                           </div>
                                         </div>
