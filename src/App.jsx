@@ -1227,12 +1227,8 @@ function DualWheelPicker({ leftLabel, rightLabel, leftOptions, rightOptions, lef
   );
 }
 function emptyIndependentExerciseRow() { return { query: '', name: null, pattern: null, equipment: null, isNew: false, sets: [{ weight: '', reps: '' }], rpe: null }; }
-function emptyIndependentDraft() {
-  return {
-    liftExercises: [], liftOverride: 'keep',
-    logRun: false, runType: 'Easy', runDistance: '', runTime: '', runEffort: null, runNotes: '', runOverride: 'keep'
-  };
-}
+function emptyIndependentLiftDraft() { return { liftExercises: [], liftOverride: 'keep' }; }
+function emptyIndependentRunDraft() { return { runType: 'Easy', runDistance: '', runTime: '', runEffort: null, runNotes: '', runOverride: 'keep' }; }
 function ExerciseCombobox({ row, onChange, customExercises, defaultEquipment }) {
   const catalog = allCatalogNames();
   const customNames = (customExercises || []).map(c => c.name);
@@ -1333,8 +1329,10 @@ export default function HybridAthleteApp() {
   const [foodDraft, setFoodDraft] = useState({ name: '', kcal: '', protein: '', carbs: '', fat: '' });
   const [todayFood, setTodayFood] = useState([]);
 
-  const [showIndependentForm, setShowIndependentForm] = useState(false);
-  const [independentDraft, setIndependentDraft] = useState(emptyIndependentDraft());
+  const [showIndependentLiftForm, setShowIndependentLiftForm] = useState(false);
+  const [independentLiftDraft, setIndependentLiftDraft] = useState(emptyIndependentLiftDraft());
+  const [showIndependentRunForm, setShowIndependentRunForm] = useState(false);
+  const [independentRunDraft, setIndependentRunDraft] = useState(emptyIndependentRunDraft());
 
   useEffect(() => {
     (async () => {
@@ -1589,31 +1587,31 @@ export default function HybridAthleteApp() {
     });
   }
   function addIndependentExerciseRow() {
-    setIndependentDraft(d => ({ ...d, liftExercises: [...d.liftExercises, emptyIndependentExerciseRow()] }));
+    setIndependentLiftDraft(d => ({ ...d, liftExercises: [...d.liftExercises, emptyIndependentExerciseRow()] }));
   }
   function updateIndependentExerciseRow(idx, nextRow) {
-    setIndependentDraft(d => ({ ...d, liftExercises: d.liftExercises.map((r, i) => i === idx ? nextRow : r) }));
+    setIndependentLiftDraft(d => ({ ...d, liftExercises: d.liftExercises.map((r, i) => i === idx ? nextRow : r) }));
   }
   function removeIndependentExerciseRow(idx) {
-    setIndependentDraft(d => ({ ...d, liftExercises: d.liftExercises.filter((_, i) => i !== idx) }));
+    setIndependentLiftDraft(d => ({ ...d, liftExercises: d.liftExercises.filter((_, i) => i !== idx) }));
   }
   function updateIndependentSet(idx, si, field, value) {
-    setIndependentDraft(d => ({
+    setIndependentLiftDraft(d => ({
       ...d, liftExercises: d.liftExercises.map((r, i) => i === idx ? { ...r, sets: r.sets.map((s, j) => j === si ? { ...s, [field]: value } : s) } : r)
     }));
   }
   function addIndependentSet(idx) {
-    setIndependentDraft(d => ({ ...d, liftExercises: d.liftExercises.map((r, i) => i === idx ? { ...r, sets: [...r.sets, { weight: '', reps: '' }] } : r) }));
+    setIndependentLiftDraft(d => ({ ...d, liftExercises: d.liftExercises.map((r, i) => i === idx ? { ...r, sets: [...r.sets, { weight: '', reps: '' }] } : r) }));
   }
   function removeIndependentSet(idx, si) {
-    setIndependentDraft(d => ({ ...d, liftExercises: d.liftExercises.map((r, i) => i === idx ? { ...r, sets: r.sets.filter((_, j) => j !== si) } : r) }));
+    setIndependentLiftDraft(d => ({ ...d, liftExercises: d.liftExercises.map((r, i) => i === idx ? { ...r, sets: r.sets.filter((_, j) => j !== si) } : r) }));
   }
-  async function saveIndependentWorkout(entry) {
+  async function saveIndependentLift(entry) {
     const date = entry.date;
     const currentLog = logsByDate[date] || buildLogSkeleton(entry);
     const newCustom = [];
     const existingNames = new Set([...allCatalogNames(), ...(profile.customExercises || []).map(c => c.name)].map(n => n.toLowerCase()));
-    const independentLift = independentDraft.liftExercises
+    const independentLift = independentLiftDraft.liftExercises
       .filter(row => row.name && row.sets.some(s => s.weight && s.reps))
       .map(row => {
         if (row.isNew && !existingNames.has(row.name.toLowerCase())) {
@@ -1627,18 +1625,14 @@ export default function HybridAthleteApp() {
           rpe: row.rpe
         };
       });
-    const independentRun = (independentDraft.logRun && independentDraft.runDistance && independentDraft.runTime)
-      ? [{ id: `indep-run-${Date.now()}`, type: independentDraft.runType, distance: independentDraft.runDistance, time: independentDraft.runTime, effort: independentDraft.runEffort, notes: independentDraft.runNotes }]
-      : [];
+    if (!independentLift.length) { setShowIndependentLiftForm(false); return; }
 
     let nextLog = {
       ...currentLog,
       independentLift: [...(currentLog.independentLift || []), ...independentLift],
-      independentRun: [...(currentLog.independentRun || []), ...independentRun],
-      liftOverride: entry.lift ? independentDraft.liftOverride : currentLog.liftOverride,
-      runOverride: entry.run ? independentDraft.runOverride : currentLog.runOverride
+      liftOverride: entry.lift ? independentLiftDraft.liftOverride : currentLog.liftOverride
     };
-    if (entry.lift && independentDraft.liftOverride === 'replace' && independentLift.length) {
+    if (entry.lift && independentLiftDraft.liftOverride === 'replace') {
       const skippedLift = {};
       Object.entries(nextLog.lift).forEach(([id, exLog]) => {
         skippedLift[id] = { ...exLog, skipped: true, rpe: null, sets: exLog.sets.map(s => ({ ...s, done: false })) };
@@ -1673,7 +1667,28 @@ export default function HybridAthleteApp() {
       }
     }
 
-    if (independentRun.length && entry.run) {
+    setHistoryLoaded(false);
+    setShowIndependentLiftForm(false);
+    setIndependentLiftDraft(emptyIndependentLiftDraft());
+  }
+  async function saveIndependentRun(entry) {
+    if (!independentRunDraft.runDistance || !independentRunDraft.runTime) return;
+    const date = entry.date;
+    const currentLog = logsByDate[date] || buildLogSkeleton(entry);
+    const independentRun = [{
+      id: `indep-run-${Date.now()}`, type: independentRunDraft.runType, distance: independentRunDraft.runDistance,
+      time: independentRunDraft.runTime, effort: independentRunDraft.runEffort, notes: independentRunDraft.runNotes
+    }];
+
+    const nextLog = {
+      ...currentLog,
+      independentRun: [...(currentLog.independentRun || []), ...independentRun],
+      runOverride: entry.run ? independentRunDraft.runOverride : currentLog.runOverride
+    };
+    setLogsByDate(prev => ({ ...prev, [date]: nextLog }));
+    saveKey(`log:${date}`, nextLog).then(ok => setSaveError(!ok));
+
+    if (entry.run) {
       const evaluation = evaluateRunLog(entry.run, { distance: independentRun[0].distance, time: independentRun[0].time, effort: independentRun[0].effort });
       if (evaluation) {
         const key = `run-${entry.weekday}`;
@@ -1683,8 +1698,8 @@ export default function HybridAthleteApp() {
     }
 
     setHistoryLoaded(false);
-    setShowIndependentForm(false);
-    setIndependentDraft(emptyIndependentDraft());
+    setShowIndependentRunForm(false);
+    setIndependentRunDraft(emptyIndependentRunDraft());
   }
   function removeLastSet(exId) {
     updateDayLog(log => {
@@ -2493,6 +2508,123 @@ export default function HybridAthleteApp() {
                 const isLoggable = entry.date <= todayStr;
                 const cachedLog = logsByDate[entry.date];
                 const dayComplete = (entry.lift || entry.run) && cachedLog && (!entry.lift || cachedLog.liftCompletedAt) && (!entry.run || cachedLog.runCompletedAt);
+                const liftLoggerUI = (
+                  <>
+                    {dayLog?.independentLift?.length > 0 && (
+                      <div className="bg-zinc-900 rounded-md p-2.5 border border-teal-600/40 space-y-2">
+                        <p className="text-xs font-bold text-teal-400 uppercase tracking-wide">Extra lift work logged</p>
+                        {dayLog.independentLift.map(exLog => (
+                          <div key={exLog.id} className="text-sm">
+                            <div className="flex items-center justify-between">
+                              <span>{exLog.name}</span>
+                              {exLog.rpe != null && <span className="text-[10px] text-zinc-500">RPE {exLog.rpe}</span>}
+                            </div>
+                            <p className="text-[11px] text-zinc-500 font-mono">{exLog.sets.map(s => `${s.weight}x${s.reps}`).join(', ')}</p>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {isLoggable && (
+                      showIndependentLiftForm ? (
+                        <div className="bg-zinc-900 rounded-md p-3 border border-zinc-700 space-y-3">
+                          <p className="text-xs font-bold text-stone-200 uppercase tracking-wide">Log your own lift workout</p>
+                          {entry.lift && (
+                            <div className="flex gap-2">
+                              <button onClick={() => setIndependentLiftDraft(d => ({ ...d, liftOverride: 'keep' }))} className={`flex-1 py-1.5 rounded text-[11px] font-bold uppercase tracking-wide ${independentLiftDraft.liftOverride === 'keep' ? 'bg-teal-500 text-zinc-900' : 'bg-zinc-800 text-zinc-400 border border-zinc-700'}`}>Keep prescribed + this</button>
+                              <button onClick={() => setIndependentLiftDraft(d => ({ ...d, liftOverride: 'replace' }))} className={`flex-1 py-1.5 rounded text-[11px] font-bold uppercase tracking-wide ${independentLiftDraft.liftOverride === 'replace' ? 'bg-amber-500 text-zinc-900' : 'bg-zinc-800 text-zinc-400 border border-zinc-700'}`}>Replace prescribed</button>
+                            </div>
+                          )}
+                          <div className="space-y-3">
+                            {independentLiftDraft.liftExercises.map((row, idx) => (
+                              <div key={idx} className="bg-zinc-800 rounded-md p-2 space-y-2">
+                                <div className="flex items-start gap-2">
+                                  <div className="flex-1">
+                                    <ExerciseCombobox row={row} onChange={next => updateIndependentExerciseRow(idx, next)} customExercises={profile.customExercises} defaultEquipment={profile.equipment} />
+                                  </div>
+                                  <button onClick={() => removeIndependentExerciseRow(idx)} className="text-zinc-500 mt-2"><X size={14} /></button>
+                                </div>
+                                {row.sets.map((s, si) => (
+                                  <div key={si} className="flex items-center gap-2">
+                                    <span className="text-[10px] w-10 font-mono text-zinc-500 shrink-0">Set {si + 1}</span>
+                                    <input placeholder="lb" value={s.weight} onChange={e => updateIndependentSet(idx, si, 'weight', e.target.value)} className="w-16 bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs" />
+                                    <input placeholder="reps" value={s.reps} onChange={e => updateIndependentSet(idx, si, 'reps', e.target.value)} className="w-14 bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs" />
+                                    {row.sets.length > 1 && <button onClick={() => removeIndependentSet(idx, si)} className="text-zinc-600"><X size={13} /></button>}
+                                  </div>
+                                ))}
+                                <button onClick={() => addIndependentSet(idx)} className="text-[11px] text-zinc-500 flex items-center gap-1"><Plus size={11} />Add set</button>
+                                <div>
+                                  <p className="text-[10px] text-zinc-500 mb-1">RPE</p>
+                                  <div className="flex flex-wrap gap-1">
+                                    {Array.from({ length: 10 }, (_, i) => i + 1).map(n => (
+                                      <button key={n} onClick={() => updateIndependentExerciseRow(idx, { ...row, rpe: n })} className={`w-6 h-6 rounded text-[11px] font-mono ${row.rpe === n ? 'bg-amber-500 text-zinc-900' : 'bg-zinc-900 text-zinc-400'}`}>{n}</button>
+                                    ))}
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                          <button onClick={addIndependentExerciseRow} className="w-full py-1.5 rounded border border-zinc-700 text-xs font-bold uppercase tracking-wide flex items-center justify-center gap-1"><Plus size={12} />Add exercise</button>
+                          <div className="flex gap-2 pt-1">
+                            <button onClick={() => { setShowIndependentLiftForm(false); setIndependentLiftDraft(emptyIndependentLiftDraft()); }} className="flex-1 py-2 rounded bg-zinc-800 border border-zinc-700 text-xs font-bold uppercase tracking-wide">Cancel</button>
+                            <button onClick={() => saveIndependentLift(entry)} className="flex-1 py-2 rounded bg-teal-500 text-zinc-900 text-xs font-bold uppercase tracking-wide">Save workout</button>
+                          </div>
+                        </div>
+                      ) : (
+                        <button onClick={() => setShowIndependentLiftForm(true)} className="w-full py-2 rounded border border-dashed border-zinc-600 text-xs font-bold uppercase tracking-wide text-zinc-400">+ Log your own lift workout</button>
+                      )
+                    )}
+                  </>
+                );
+                const runLoggerUI = (
+                  <>
+                    {dayLog?.independentRun?.length > 0 && (
+                      <div className="bg-zinc-900 rounded-md p-2.5 border border-teal-600/40 space-y-2">
+                        <p className="text-xs font-bold text-teal-400 uppercase tracking-wide">Extra run logged</p>
+                        {dayLog.independentRun.map(r => (
+                          <div key={r.id} className="text-sm flex items-center justify-between">
+                            <span>{r.type} run</span>
+                            <span className="font-mono text-xs text-zinc-400">{r.distance}mi · {r.time}{r.effort != null ? ` · RPE ${r.effort}` : ''}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {isLoggable && (
+                      showIndependentRunForm ? (
+                        <div className="bg-zinc-900 rounded-md p-3 border border-zinc-700 space-y-3">
+                          <p className="text-xs font-bold text-stone-200 uppercase tracking-wide">Log your own run</p>
+                          {entry.run && (
+                            <div className="flex gap-2">
+                              <button onClick={() => setIndependentRunDraft(d => ({ ...d, runOverride: 'keep' }))} className={`flex-1 py-1.5 rounded text-[11px] font-bold uppercase tracking-wide ${independentRunDraft.runOverride === 'keep' ? 'bg-teal-500 text-zinc-900' : 'bg-zinc-800 text-zinc-400 border border-zinc-700'}`}>Keep prescribed + this</button>
+                              <button onClick={() => setIndependentRunDraft(d => ({ ...d, runOverride: 'replace' }))} className={`flex-1 py-1.5 rounded text-[11px] font-bold uppercase tracking-wide ${independentRunDraft.runOverride === 'replace' ? 'bg-amber-500 text-zinc-900' : 'bg-zinc-800 text-zinc-400 border border-zinc-700'}`}>Replace prescribed</button>
+                            </div>
+                          )}
+                          <select value={independentRunDraft.runType} onChange={e => setIndependentRunDraft(d => ({ ...d, runType: e.target.value }))} className="w-full bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs">
+                            <option value="Easy">Easy</option><option value="Long">Long</option><option value="Tempo">Tempo</option><option value="Interval">Interval</option><option value="Race">Race</option>
+                          </select>
+                          <div className="grid grid-cols-2 gap-2">
+                            <input placeholder="miles" value={independentRunDraft.runDistance} onChange={e => setIndependentRunDraft(d => ({ ...d, runDistance: e.target.value }))} className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs" />
+                            <input placeholder="time (mm:ss)" value={independentRunDraft.runTime} onChange={e => setIndependentRunDraft(d => ({ ...d, runTime: e.target.value }))} className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs" />
+                          </div>
+                          <input placeholder="notes (optional)" value={independentRunDraft.runNotes} onChange={e => setIndependentRunDraft(d => ({ ...d, runNotes: e.target.value }))} className="w-full bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs" />
+                          <div>
+                            <p className="text-[10px] text-zinc-500 mb-1">Effort (RPE)</p>
+                            <div className="flex flex-wrap gap-1">
+                              {Array.from({ length: 10 }, (_, i) => i + 1).map(n => (
+                                <button key={n} onClick={() => setIndependentRunDraft(d => ({ ...d, runEffort: n }))} className={`w-6 h-6 rounded text-[11px] font-mono ${independentRunDraft.runEffort === n ? 'bg-amber-500 text-zinc-900' : 'bg-zinc-900 text-zinc-400'}`}>{n}</button>
+                              ))}
+                            </div>
+                          </div>
+                          <div className="flex gap-2 pt-1">
+                            <button onClick={() => { setShowIndependentRunForm(false); setIndependentRunDraft(emptyIndependentRunDraft()); }} className="flex-1 py-2 rounded bg-zinc-800 border border-zinc-700 text-xs font-bold uppercase tracking-wide">Cancel</button>
+                            <button onClick={() => saveIndependentRun(entry)} className="flex-1 py-2 rounded bg-teal-500 text-zinc-900 text-xs font-bold uppercase tracking-wide">Save run</button>
+                          </div>
+                        </div>
+                      ) : (
+                        <button onClick={() => setShowIndependentRunForm(true)} className="w-full py-2 rounded border border-dashed border-zinc-600 text-xs font-bold uppercase tracking-wide text-zinc-400">+ Log your own run</button>
+                      )
+                    )}
+                  </>
+                );
                 return (
                   <Card key={d} className={isToday ? 'border-amber-500' : ''}>
                     <button className="w-full flex items-center justify-between text-left" onClick={() => toggleDay(entry)}>
@@ -2656,6 +2788,7 @@ export default function HybridAthleteApp() {
                                 )}
                               </div>
                             )}
+                            {liftLoggerUI}
                           </div>
                         )}
                         {entry.run && (!entry.lift || sessionFocus === 'run') && (() => {
@@ -2792,117 +2925,17 @@ export default function HybridAthleteApp() {
                                 )}
                               </div>
                             )}
+                            {runLoggerUI}
                           </div>
                           );
                         })()}
+                        {!entry.lift && liftLoggerUI}
+                        {!entry.run && runLoggerUI}
                         {!entry.lift && !entry.run && (
                           <div className="bg-zinc-900 rounded-md p-3 border border-zinc-700">
                             <p className="text-xs font-bold text-stone-300 uppercase tracking-wide mb-1">{entry.type === 'active_recovery' ? 'Active Recovery' : 'Rest Day'}</p>
                             <p className="text-[11px] text-zinc-400">{dayMessage(entry.type === 'active_recovery' ? ACTIVE_RECOVERY_MESSAGES : REST_MESSAGES, entry.date)}</p>
                           </div>
-                        )}
-                        {(dayLog?.independentLift?.length > 0 || dayLog?.independentRun?.length > 0) && (
-                          <div className="bg-zinc-900 rounded-md p-2.5 border border-teal-600/40 space-y-2">
-                            <p className="text-xs font-bold text-teal-400 uppercase tracking-wide">Extra work logged</p>
-                            {dayLog.independentLift.map(exLog => (
-                              <div key={exLog.id} className="text-sm">
-                                <div className="flex items-center justify-between">
-                                  <span>{exLog.name}</span>
-                                  {exLog.rpe != null && <span className="text-[10px] text-zinc-500">RPE {exLog.rpe}</span>}
-                                </div>
-                                <p className="text-[11px] text-zinc-500 font-mono">{exLog.sets.map(s => `${s.weight}x${s.reps}`).join(', ')}</p>
-                              </div>
-                            ))}
-                            {dayLog.independentRun.map(r => (
-                              <div key={r.id} className="text-sm flex items-center justify-between">
-                                <span>{r.type} run</span>
-                                <span className="font-mono text-xs text-zinc-400">{r.distance}mi · {r.time}{r.effort != null ? ` · RPE ${r.effort}` : ''}</span>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                        {isLoggable && (
-                          showIndependentForm ? (
-                            <div className="bg-zinc-900 rounded-md p-3 border border-zinc-700 space-y-3">
-                              <p className="text-xs font-bold text-stone-200 uppercase tracking-wide">Log your own workout</p>
-                              {entry.lift && (
-                                <div className="flex gap-2">
-                                  <button onClick={() => setIndependentDraft(d => ({ ...d, liftOverride: 'keep' }))} className={`flex-1 py-1.5 rounded text-[11px] font-bold uppercase tracking-wide ${independentDraft.liftOverride === 'keep' ? 'bg-teal-500 text-zinc-900' : 'bg-zinc-800 text-zinc-400 border border-zinc-700'}`}>Keep prescribed + this</button>
-                                  <button onClick={() => setIndependentDraft(d => ({ ...d, liftOverride: 'replace' }))} className={`flex-1 py-1.5 rounded text-[11px] font-bold uppercase tracking-wide ${independentDraft.liftOverride === 'replace' ? 'bg-amber-500 text-zinc-900' : 'bg-zinc-800 text-zinc-400 border border-zinc-700'}`}>Replace prescribed</button>
-                                </div>
-                              )}
-                              <div className="space-y-3">
-                                {independentDraft.liftExercises.map((row, idx) => (
-                                  <div key={idx} className="bg-zinc-800 rounded-md p-2 space-y-2">
-                                    <div className="flex items-start gap-2">
-                                      <div className="flex-1">
-                                        <ExerciseCombobox row={row} onChange={next => updateIndependentExerciseRow(idx, next)} customExercises={profile.customExercises} defaultEquipment={profile.equipment} />
-                                      </div>
-                                      <button onClick={() => removeIndependentExerciseRow(idx)} className="text-zinc-500 mt-2"><X size={14} /></button>
-                                    </div>
-                                    {row.sets.map((s, si) => (
-                                      <div key={si} className="flex items-center gap-2">
-                                        <span className="text-[10px] w-10 font-mono text-zinc-500 shrink-0">Set {si + 1}</span>
-                                        <input placeholder="lb" value={s.weight} onChange={e => updateIndependentSet(idx, si, 'weight', e.target.value)} className="w-16 bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs" />
-                                        <input placeholder="reps" value={s.reps} onChange={e => updateIndependentSet(idx, si, 'reps', e.target.value)} className="w-14 bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs" />
-                                        {row.sets.length > 1 && <button onClick={() => removeIndependentSet(idx, si)} className="text-zinc-600"><X size={13} /></button>}
-                                      </div>
-                                    ))}
-                                    <button onClick={() => addIndependentSet(idx)} className="text-[11px] text-zinc-500 flex items-center gap-1"><Plus size={11} />Add set</button>
-                                    <div>
-                                      <p className="text-[10px] text-zinc-500 mb-1">RPE</p>
-                                      <div className="flex flex-wrap gap-1">
-                                        {Array.from({ length: 10 }, (_, i) => i + 1).map(n => (
-                                          <button key={n} onClick={() => updateIndependentExerciseRow(idx, { ...row, rpe: n })} className={`w-6 h-6 rounded text-[11px] font-mono ${row.rpe === n ? 'bg-amber-500 text-zinc-900' : 'bg-zinc-900 text-zinc-400'}`}>{n}</button>
-                                        ))}
-                                      </div>
-                                    </div>
-                                  </div>
-                                ))}
-                              </div>
-                              <button onClick={addIndependentExerciseRow} className="w-full py-1.5 rounded border border-zinc-700 text-xs font-bold uppercase tracking-wide flex items-center justify-center gap-1"><Plus size={12} />Add exercise</button>
-
-                              <div className="pt-2 border-t border-zinc-700 space-y-2">
-                                <label className="flex items-center gap-2 text-xs text-zinc-300">
-                                  <input type="checkbox" checked={independentDraft.logRun} onChange={e => setIndependentDraft(d => ({ ...d, logRun: e.target.checked }))} />
-                                  Also log a run
-                                </label>
-                                {independentDraft.logRun && (
-                                  <div className="space-y-2">
-                                    {entry.run && (
-                                      <div className="flex gap-2">
-                                        <button onClick={() => setIndependentDraft(d => ({ ...d, runOverride: 'keep' }))} className={`flex-1 py-1.5 rounded text-[11px] font-bold uppercase tracking-wide ${independentDraft.runOverride === 'keep' ? 'bg-teal-500 text-zinc-900' : 'bg-zinc-800 text-zinc-400 border border-zinc-700'}`}>Keep prescribed + this</button>
-                                        <button onClick={() => setIndependentDraft(d => ({ ...d, runOverride: 'replace' }))} className={`flex-1 py-1.5 rounded text-[11px] font-bold uppercase tracking-wide ${independentDraft.runOverride === 'replace' ? 'bg-amber-500 text-zinc-900' : 'bg-zinc-800 text-zinc-400 border border-zinc-700'}`}>Replace prescribed</button>
-                                      </div>
-                                    )}
-                                    <select value={independentDraft.runType} onChange={e => setIndependentDraft(d => ({ ...d, runType: e.target.value }))} className="w-full bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs">
-                                      <option value="Easy">Easy</option><option value="Long">Long</option><option value="Tempo">Tempo</option><option value="Quality">Quality</option><option value="Race">Race</option>
-                                    </select>
-                                    <div className="grid grid-cols-2 gap-2">
-                                      <input placeholder="miles" value={independentDraft.runDistance} onChange={e => setIndependentDraft(d => ({ ...d, runDistance: e.target.value }))} className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs" />
-                                      <input placeholder="time (mm:ss)" value={independentDraft.runTime} onChange={e => setIndependentDraft(d => ({ ...d, runTime: e.target.value }))} className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs" />
-                                    </div>
-                                    <input placeholder="notes (optional)" value={independentDraft.runNotes} onChange={e => setIndependentDraft(d => ({ ...d, runNotes: e.target.value }))} className="w-full bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs" />
-                                    <div>
-                                      <p className="text-[10px] text-zinc-500 mb-1">Effort (RPE)</p>
-                                      <div className="flex flex-wrap gap-1">
-                                        {Array.from({ length: 10 }, (_, i) => i + 1).map(n => (
-                                          <button key={n} onClick={() => setIndependentDraft(d => ({ ...d, runEffort: n }))} className={`w-6 h-6 rounded text-[11px] font-mono ${independentDraft.runEffort === n ? 'bg-amber-500 text-zinc-900' : 'bg-zinc-900 text-zinc-400'}`}>{n}</button>
-                                        ))}
-                                      </div>
-                                    </div>
-                                  </div>
-                                )}
-                              </div>
-
-                              <div className="flex gap-2 pt-1">
-                                <button onClick={() => { setShowIndependentForm(false); setIndependentDraft(emptyIndependentDraft()); }} className="flex-1 py-2 rounded bg-zinc-800 border border-zinc-700 text-xs font-bold uppercase tracking-wide">Cancel</button>
-                                <button onClick={() => saveIndependentWorkout(entry)} className="flex-1 py-2 rounded bg-teal-500 text-zinc-900 text-xs font-bold uppercase tracking-wide">Save workout</button>
-                              </div>
-                            </div>
-                          ) : (
-                            <button onClick={() => setShowIndependentForm(true)} className="w-full py-2 rounded border border-dashed border-zinc-600 text-xs font-bold uppercase tracking-wide text-zinc-400">+ Log your own workout</button>
-                          )
                         )}
                         {isLoggable && saveError && <p className="text-[11px] text-orange-400">Couldn't save just now — check your connection and try again.</p>}
                       </div>
