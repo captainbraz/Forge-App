@@ -571,6 +571,10 @@ function aggregateRunStats(logs, profile) {
     }
     (l.independentRun || []).forEach(entry => {
       if (entry.distance && entry.time) runs.push({ date: l.date, distance: Number(entry.distance), time: entry.time, effort: entry.effort, notes: entry.notes });
+      if (entry.laps?.length) {
+        const wp = lapPaceStats(entry.laps, 'warmup'); if (wp) warmupPaces.push(wp);
+        const cp = lapPaceStats(entry.laps, 'cooldown'); if (cp) cooldownPaces.push(cp);
+      }
     });
   });
   runs.sort((a, b) => b.date.localeCompare(a.date));
@@ -662,6 +666,23 @@ function runLogTotals(runEntry, log, profile) {
   }
   if (!totalDistance) return { distance: '', time: '' };
   return { distance: +totalDistance.toFixed(2), time: secondsToTimeStr(totalSeconds) };
+}
+const LAP_TYPE_LABELS = { warmup: 'Warm-up', active: 'Active', recovery: 'Recovery', cooldown: 'Cool-down', rest: 'Rest' };
+function emptyLap() { return { type: 'active', distance: '', time: '' }; }
+function lapTotals(laps) {
+  let totalDistance = 0, totalSeconds = 0;
+  (laps || []).forEach(l => {
+    if (l.distance && l.time) {
+      const sec = timeStrToSeconds(l.time);
+      if (sec != null) { totalDistance += Number(l.distance); totalSeconds += sec; }
+    }
+  });
+  if (!totalDistance) return { distance: '', time: '' };
+  return { distance: +totalDistance.toFixed(2), time: secondsToTimeStr(totalSeconds) };
+}
+function lapPaceStats(laps, type) {
+  const paces = (laps || []).filter(l => l.type === type && l.distance && l.time).map(l => actualPaceSeconds(l.distance, l.time)).filter(Boolean);
+  return paces.length ? paces.reduce((a, b) => a + b, 0) / paces.length : null;
 }
 
 // ---------- Garmin TCX upload ----------
@@ -1228,7 +1249,7 @@ function DualWheelPicker({ leftLabel, rightLabel, leftOptions, rightOptions, lef
 }
 function emptyIndependentExerciseRow() { return { query: '', name: null, pattern: null, equipment: null, isNew: false, sets: [{ weight: '', reps: '' }], rpe: null }; }
 function emptyIndependentLiftDraft() { return { liftExercises: [], liftOverride: 'keep' }; }
-function emptyIndependentRunDraft() { return { runType: 'Easy', runDistance: '', runTime: '', runEffort: null, runNotes: '', runOverride: 'keep' }; }
+function emptyIndependentRunDraft() { return { runType: 'Easy', runDistance: '', runTime: '', runEffort: null, runNotes: '', runOverride: 'keep', laps: [] }; }
 function ExerciseCombobox({ row, onChange, customExercises, defaultEquipment }) {
   const catalog = allCatalogNames();
   const customNames = (customExercises || []).map(c => c.name);
@@ -1671,13 +1692,25 @@ export default function HybridAthleteApp() {
     setShowIndependentLiftForm(false);
     setIndependentLiftDraft(emptyIndependentLiftDraft());
   }
+  function addIndependentLap() {
+    setIndependentRunDraft(d => ({ ...d, laps: [...d.laps, emptyLap()] }));
+  }
+  function updateIndependentLap(idx, field, value) {
+    setIndependentRunDraft(d => ({ ...d, laps: d.laps.map((l, i) => i === idx ? { ...l, [field]: value } : l) }));
+  }
+  function removeIndependentLap(idx) {
+    setIndependentRunDraft(d => ({ ...d, laps: d.laps.filter((_, i) => i !== idx) }));
+  }
   async function saveIndependentRun(entry) {
-    if (!independentRunDraft.runDistance || !independentRunDraft.runTime) return;
+    const hasLaps = independentRunDraft.laps.length > 0;
+    const totals = hasLaps ? lapTotals(independentRunDraft.laps) : { distance: independentRunDraft.runDistance, time: independentRunDraft.runTime };
+    if (!totals.distance || !totals.time) return;
     const date = entry.date;
     const currentLog = logsByDate[date] || buildLogSkeleton(entry);
     const independentRun = [{
-      id: `indep-run-${Date.now()}`, type: independentRunDraft.runType, distance: independentRunDraft.runDistance,
-      time: independentRunDraft.runTime, effort: independentRunDraft.runEffort, notes: independentRunDraft.runNotes
+      id: `indep-run-${Date.now()}`, type: independentRunDraft.runType, distance: totals.distance,
+      time: totals.time, effort: independentRunDraft.runEffort, notes: independentRunDraft.runNotes,
+      laps: hasLaps ? independentRunDraft.laps : undefined
     }];
 
     const nextLog = {
@@ -2581,9 +2614,18 @@ export default function HybridAthleteApp() {
                       <div className="bg-zinc-900 rounded-md p-2.5 border border-teal-600/40 space-y-2">
                         <p className="text-xs font-bold text-teal-400 uppercase tracking-wide">Extra run logged</p>
                         {dayLog.independentRun.map(r => (
-                          <div key={r.id} className="text-sm flex items-center justify-between">
-                            <span>{r.type} run</span>
-                            <span className="font-mono text-xs text-zinc-400">{r.distance}mi · {r.time}{r.effort != null ? ` · RPE ${r.effort}` : ''}</span>
+                          <div key={r.id} className="text-sm">
+                            <div className="flex items-center justify-between">
+                              <span>{r.type} run</span>
+                              <span className="font-mono text-xs text-zinc-400">{r.distance}mi · {r.time}{r.effort != null ? ` · RPE ${r.effort}` : ''}</span>
+                            </div>
+                            {r.laps?.length > 0 && (
+                              <div className="mt-1 pl-2 border-l border-zinc-700 space-y-0.5">
+                                {r.laps.map((l, li) => (
+                                  <p key={li} className="text-[10px] text-zinc-500 font-mono">{LAP_TYPE_LABELS[l.type] || l.type}: {l.distance}mi · {l.time}</p>
+                                ))}
+                              </div>
+                            )}
                           </div>
                         ))}
                       </div>
@@ -2598,12 +2640,33 @@ export default function HybridAthleteApp() {
                               <button onClick={() => setIndependentRunDraft(d => ({ ...d, runOverride: 'replace' }))} className={`flex-1 py-1.5 rounded text-[11px] font-bold uppercase tracking-wide ${independentRunDraft.runOverride === 'replace' ? 'bg-amber-500 text-zinc-900' : 'bg-zinc-800 text-zinc-400 border border-zinc-700'}`}>Replace prescribed</button>
                             </div>
                           )}
-                          <select value={independentRunDraft.runType} onChange={e => setIndependentRunDraft(d => ({ ...d, runType: e.target.value }))} className="w-full bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs">
-                            <option value="Easy">Easy</option><option value="Long">Long</option><option value="Tempo">Tempo</option><option value="Interval">Interval</option><option value="Race">Race</option>
-                          </select>
-                          <div className="grid grid-cols-2 gap-2">
-                            <input placeholder="miles" value={independentRunDraft.runDistance} onChange={e => setIndependentRunDraft(d => ({ ...d, runDistance: e.target.value }))} className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs" />
-                            <input placeholder="time (mm:ss)" value={independentRunDraft.runTime} onChange={e => setIndependentRunDraft(d => ({ ...d, runTime: e.target.value }))} className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs" />
+                          <div>
+                            <p className="text-[10px] text-zinc-500 mb-1">Run type</p>
+                            <select value={independentRunDraft.runType} onChange={e => setIndependentRunDraft(d => ({ ...d, runType: e.target.value }))} className="w-full bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs">
+                              <option value="Easy">Easy</option><option value="Long">Long</option><option value="Tempo">Tempo</option><option value="Interval">Interval</option><option value="Race">Race</option>
+                            </select>
+                          </div>
+                          {independentRunDraft.laps.length === 0 ? (
+                            <div className="grid grid-cols-2 gap-2">
+                              <input placeholder="miles" value={independentRunDraft.runDistance} onChange={e => setIndependentRunDraft(d => ({ ...d, runDistance: e.target.value }))} className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs" />
+                              <input placeholder="time (mm:ss)" value={independentRunDraft.runTime} onChange={e => setIndependentRunDraft(d => ({ ...d, runTime: e.target.value }))} className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs" />
+                            </div>
+                          ) : (
+                            <p className="text-[11px] text-teal-400">Total: {lapTotals(independentRunDraft.laps).distance || 0}mi · {lapTotals(independentRunDraft.laps).time || '0:00'} (from laps below)</p>
+                          )}
+                          <div className="space-y-1.5">
+                            <p className="text-[10px] text-zinc-500">Laps (optional)</p>
+                            {independentRunDraft.laps.map((lap, li) => (
+                              <div key={li} className="flex items-center gap-1.5">
+                                <select value={lap.type} onChange={e => updateIndependentLap(li, 'type', e.target.value)} className="bg-zinc-900 border border-zinc-700 rounded px-1.5 py-1 text-[11px] w-24 shrink-0">
+                                  {Object.entries(LAP_TYPE_LABELS).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
+                                </select>
+                                <input placeholder="mi" value={lap.distance} onChange={e => updateIndependentLap(li, 'distance', e.target.value)} className="w-14 bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs" />
+                                <input placeholder="mm:ss" value={lap.time} onChange={e => updateIndependentLap(li, 'time', e.target.value)} className="w-16 bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs" />
+                                <button onClick={() => removeIndependentLap(li)} className="text-zinc-600 shrink-0"><X size={13} /></button>
+                              </div>
+                            ))}
+                            <button onClick={addIndependentLap} className="w-full py-1.5 rounded border border-zinc-700 text-[11px] font-bold uppercase tracking-wide flex items-center justify-center gap-1"><Plus size={11} />Add lap</button>
                           </div>
                           <input placeholder="notes (optional)" value={independentRunDraft.runNotes} onChange={e => setIndependentRunDraft(d => ({ ...d, runNotes: e.target.value }))} className="w-full bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs" />
                           <div>
