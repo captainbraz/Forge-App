@@ -1095,7 +1095,10 @@ function buildLogSkeleton(entry) {
     };
   });
   const run = entry.run ? buildRunLogSkeleton(entry.run) : null;
-  return { lift, run, liftCompletedAt: null, runCompletedAt: null, independentLift: [], independentRun: [], liftOverride: null, runOverride: null };
+  return {
+    lift, run, liftCompletedAt: null, runCompletedAt: null, independentLift: [], independentRun: [], liftOverride: null, runOverride: null,
+    liftEverCompleted: false, runEverCompleted: false
+  };
 }
 function mergeLog(skeleton, saved) {
   if (!saved) return skeleton;
@@ -1116,8 +1119,41 @@ function mergeLog(skeleton, saved) {
   return {
     lift, run, liftCompletedAt: saved.liftCompletedAt || null, runCompletedAt: saved.runCompletedAt || null,
     independentLift: saved.independentLift || [], independentRun: saved.independentRun || [],
-    liftOverride: saved.liftOverride || null, runOverride: saved.runOverride || null
+    liftOverride: saved.liftOverride || null, runOverride: saved.runOverride || null,
+    liftEverCompleted: saved.liftEverCompleted || false, runEverCompleted: saved.runEverCompleted || false
   };
+}
+function computeLiftComplete(entry, log) {
+  if (!entry.lift || !log.lift) return false;
+  return entry.lift.exercises.every(ex => {
+    const exLog = log.lift[ex.id];
+    if (!exLog || exLog.skipped) return true;
+    if (exLog.rpe == null) return false;
+    return exLog.sets.every(s => s.done);
+  });
+}
+function computeRunComplete(entry, log, profile) {
+  if (!entry.run || !log.run) return false;
+  const totals = runLogTotals(entry.run, log.run, profile);
+  return !!(totals.distance && totals.time && log.run.effort != null);
+}
+function reconcileCompletion(entry, log, profile) {
+  let next = log;
+  if (entry.lift && log.liftEverCompleted) {
+    const nowComplete = computeLiftComplete(entry, log);
+    if (nowComplete && !log.liftCompletedAt) next = { ...next, liftCompletedAt: new Date().toISOString() };
+    else if (!nowComplete && log.liftCompletedAt) next = { ...next, liftCompletedAt: null };
+  }
+  if (entry.run && log.runEverCompleted) {
+    const nowComplete = computeRunComplete(entry, log, profile);
+    if (nowComplete && !log.runCompletedAt) next = { ...next, runCompletedAt: new Date().toISOString() };
+    else if (!nowComplete && log.runCompletedAt) next = { ...next, runCompletedAt: null };
+  }
+  return next;
+}
+function findEntryByDate(calendar, date) {
+  for (const w of calendar) { const found = Object.values(w.days).find(d => d.date === date); if (found) return found; }
+  return null;
 }
 
 // ---------- UI atoms ----------
@@ -1441,7 +1477,9 @@ export default function HybridAthleteApp() {
   }
   function updateDayLog(updater) {
     setLogsByDate(prev => {
-      const next = updater(prev[expandedDate]);
+      let next = updater(prev[expandedDate]);
+      const entry = findEntryByDate(calendar, expandedDate);
+      if (entry) next = reconcileCompletion(entry, next, profile);
       saveKey(`log:${expandedDate}`, next).then(ok => setSaveError(!ok));
       return { ...prev, [expandedDate]: next };
     });
@@ -1455,9 +1493,12 @@ export default function HybridAthleteApp() {
   }
   function persistCurrentLog() {
     setLogsByDate(prev => {
-      const current = prev[expandedDate];
-      if (current) saveKey(`log:${expandedDate}`, current).then(ok => setSaveError(!ok));
-      return prev;
+      let current = prev[expandedDate];
+      if (!current) return prev;
+      const entry = findEntryByDate(calendar, expandedDate);
+      if (entry) current = reconcileCompletion(entry, current, profile);
+      saveKey(`log:${expandedDate}`, current).then(ok => setSaveError(!ok));
+      return { ...prev, [expandedDate]: current };
     });
   }
   function handleWeightBlur(exId, si, ex) {
@@ -1503,7 +1544,11 @@ export default function HybridAthleteApp() {
       if (exLog.rpe == null) missingRpeIds.push(ex.id);
     });
     const allRated = missingRpeIds.length === 0;
-    const nextLog = { ...currentLog, lift: nextLift, liftCompletedAt: allRated ? new Date().toISOString() : null };
+    const nextLog = {
+      ...currentLog, lift: nextLift,
+      liftCompletedAt: allRated ? new Date().toISOString() : null,
+      liftEverCompleted: allRated ? true : currentLog.liftEverCompleted
+    };
     setLogsByDate(prev => ({ ...prev, [expandedDate]: nextLog }));
     saveKey(`log:${expandedDate}`, nextLog).then(ok => setSaveError(!ok));
     if (!allRated) {
@@ -1539,7 +1584,7 @@ export default function HybridAthleteApp() {
       return;
     }
     setRunCompleteMessage('');
-    const nextLog = { ...currentLog, runCompletedAt: new Date().toISOString() };
+    const nextLog = { ...currentLog, runCompletedAt: new Date().toISOString(), runEverCompleted: true };
     setLogsByDate(prev => ({ ...prev, [expandedDate]: nextLog }));
     saveKey(`log:${expandedDate}`, nextLog).then(ok => setSaveError(!ok));
     const evaluation = evaluateRunLog(entry.run, totals);
@@ -1551,14 +1596,19 @@ export default function HybridAthleteApp() {
     }
     setHistoryLoaded(false);
   }
-  function toggleSetDone(exId, setIdx, restStr) {
-    updateDayLog(log => {
-      const ex = log.lift[exId];
-      const newDone = !ex.sets[setIdx].done;
-      const newSets = ex.sets.map((s, i) => i === setIdx ? { ...s, done: newDone } : s);
-      if (newDone) { const secs = parseRestSeconds(restStr); setTimer({ secondsLeft: secs, total: secs, done: false }); }
-      return { ...log, lift: { ...log.lift, [exId]: { ...ex, sets: newSets } } };
-    });
+  function toggleSetDone(ex, setIdx) {
+    const currentLog = logsByDate[expandedDate];
+    const exLog = currentLog.lift[ex.id];
+    const newDone = !exLog.sets[setIdx].done;
+    const newSets = exLog.sets.map((s, i) => i === setIdx ? { ...s, done: newDone } : s);
+    const nextExLog = { ...exLog, sets: newSets };
+    updateDayLog(log => ({ ...log, lift: { ...log.lift, [ex.id]: nextExLog } }));
+    if (newDone) { const secs = parseRestSeconds(ex.rest); setTimer({ secondsLeft: secs, total: secs, done: false }); }
+    // re-sync the learned weight if this exercise was already rated — a set toggle after RPE entry changes what "best set" means
+    if (nextExLog.rpe != null) {
+      const learned = computeLearnedOneRM(ex, nextExLog);
+      if (learned) applyLearnedOneRM(nextExLog.swappedName || ex.name, ex.pattern, learned);
+    }
   }
   function applyLearnedOneRM(name, pattern, learned) {
     const nextLearned = { ...(profile.learnedOneRMs || {}), [name]: learned };
@@ -2816,7 +2866,7 @@ export default function HybridAthleteApp() {
                                                   <span className={`text-[10px] w-10 font-mono shrink-0 ${rowLabel.color}`}>{rowLabel.label}</span>
                                                   <input placeholder={ex.weight ? String(ex.weight) : 'lb'} value={s.weight} onChange={e => updateSetLocal(ex.id, si, 'weight', e.target.value)} onBlur={() => handleWeightBlur(ex.id, si, ex)} className="w-16 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs" />
                                                   <input placeholder="reps" value={s.reps} onChange={e => updateSetLocal(ex.id, si, 'reps', e.target.value)} onBlur={persistCurrentLog} className="w-14 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs" />
-                                                  <button onClick={() => toggleSetDone(ex.id, si, ex.rest)} className={`ml-auto w-6 h-6 rounded border flex items-center justify-center shrink-0 ${s.done ? 'bg-teal-500 border-teal-500' : 'border-zinc-600'}`}>{s.done && <Check size={12} className="text-zinc-900" />}</button>
+                                                  <button onClick={() => toggleSetDone(ex, si)} className={`ml-auto w-6 h-6 rounded border flex items-center justify-center shrink-0 ${s.done ? 'bg-teal-500 border-teal-500' : 'border-zinc-600'}`}>{s.done && <Check size={12} className="text-zinc-900" />}</button>
                                                   {isLast && log.sets.length > 1 && (
                                                     <button onClick={() => removeLastSet(ex.id)} className="text-zinc-600 shrink-0"><X size={13} /></button>
                                                   )}
