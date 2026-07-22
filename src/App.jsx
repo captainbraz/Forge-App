@@ -14,13 +14,17 @@ const DIST_MILES = { '5k': 3.1069, '2mi': 2, '10k': 6.2137, half: 13.1094, marat
 
 // ---------- storage helpers ----------
 async function loadKey(key) {
-  try { const r = await window.storage.get(key, false); return r ? JSON.parse(r.value) : null; } catch (e) { return null; }
+  try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : null; } catch (e) { return null; }
 }
 async function saveKey(key, value) {
-  try { const result = await window.storage.set(key, JSON.stringify(value), false); return !!result; } catch (e) { console.error('storage save failed', e); return false; }
+  try { localStorage.setItem(key, JSON.stringify(value)); return true; } catch (e) { console.error('storage save failed', e); return false; }
 }
 async function listKeys(prefix) {
-  try { const r = await window.storage.list(prefix, false); return (r && r.keys) || []; } catch (e) { return []; }
+  try {
+    const keys = [];
+    for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k && k.startsWith(prefix)) keys.push(k); }
+    return keys;
+  } catch (e) { return []; }
 }
 
 // ---------- date helpers ----------
