@@ -1316,6 +1316,7 @@ export default function HybridAthleteApp() {
   const [garminError, setGarminError] = useState('');
   const [garminAnalysis, setGarminAnalysis] = useState(null);
   const [liftCompleteMessage, setLiftCompleteMessage] = useState('');
+  const [pendingRpeQueue, setPendingRpeQueue] = useState([]);
   const [runCompleteMessage, setRunCompleteMessage] = useState('');
 
   const [setupStep, setSetupStep] = useState(0);
@@ -1432,7 +1433,7 @@ export default function HybridAthleteApp() {
     setSessionFocus(null);
     setSaveError(false);
     setGarminError(''); setGarminAnalysis(null);
-    setLiftCompleteMessage(''); setRunCompleteMessage('');
+    setLiftCompleteMessage(''); setRunCompleteMessage(''); setPendingRpeQueue([]);
     if (!logsByDate[entry.date]) {
       const saved = await loadKey(`log:${entry.date}`);
       setLogsByDate(prev => ({ ...prev, [entry.date]: mergeLog(buildLogSkeleton(entry), saved) }));
@@ -1493,24 +1494,25 @@ export default function HybridAthleteApp() {
   function completeLift(entry) {
     const currentLog = logsByDate[expandedDate];
     const nextLift = {};
-    const missingRpeNames = [];
-    let firstMissingId = null;
+    const missingRpeIds = [];
     entry.lift.exercises.forEach(ex => {
       const exLog = currentLog.lift[ex.id];
       if (exLog.skipped) { nextLift[ex.id] = exLog; return; }
       const sets = exLog.sets.map(s => ({ ...s, done: true }));
       nextLift[ex.id] = { ...exLog, sets };
-      if (exLog.rpe == null) { missingRpeNames.push(exLog.swappedName || ex.name); if (!firstMissingId) firstMissingId = ex.id; }
+      if (exLog.rpe == null) missingRpeIds.push(ex.id);
     });
-    const allRated = missingRpeNames.length === 0;
+    const allRated = missingRpeIds.length === 0;
     const nextLog = { ...currentLog, lift: nextLift, liftCompletedAt: allRated ? new Date().toISOString() : null };
     setLogsByDate(prev => ({ ...prev, [expandedDate]: nextLog }));
     saveKey(`log:${expandedDate}`, nextLog).then(ok => setSaveError(!ok));
     if (!allRated) {
-      setExpandedExerciseId(firstMissingId);
-      setLiftCompleteMessage(`Rate RPE for: ${missingRpeNames.join(', ')} to finish.`);
+      setPendingRpeQueue(missingRpeIds);
+      setExpandedExerciseId(missingRpeIds[0]);
+      setLiftCompleteMessage(`Rate RPE for ${missingRpeIds.length} more exercise${missingRpeIds.length === 1 ? '' : 's'} to finish.`);
       return;
     }
+    setPendingRpeQueue([]);
     setLiftCompleteMessage('');
     let nextSuggestions = { ...suggestions };
     entry.lift.exercises.forEach(ex => {
@@ -1580,6 +1582,18 @@ export default function HybridAthleteApp() {
     }
     const learned = computeLearnedOneRM(ex, nextExLog);
     if (learned) applyLearnedOneRM(exerciseName, ex.pattern, learned);
+
+    if (pendingRpeQueue.includes(ex.id)) {
+      const remaining = pendingRpeQueue.filter(id => id !== ex.id);
+      setPendingRpeQueue(remaining);
+      if (remaining.length > 0) {
+        setExpandedExerciseId(remaining[0]);
+        setLiftCompleteMessage(`Rate RPE for ${remaining.length} more exercise${remaining.length === 1 ? '' : 's'} to finish.`);
+      } else {
+        setExpandedExerciseId(null);
+        setLiftCompleteMessage('All rated — tap Complete Lift Workout to finish.');
+      }
+    }
   }
   function swapToday(exId, ex, currentName) {
     updateDayLog(log => {
@@ -2843,7 +2857,7 @@ export default function HybridAthleteApp() {
                             )}
                             {isLoggable && dayLog && (
                               <div className="mt-3 pt-3 border-t border-zinc-700">
-                                {liftCompleteMessage && <p className="text-[11px] text-orange-400 mb-1.5">{liftCompleteMessage}</p>}
+                                {liftCompleteMessage && <p className={`text-[11px] mb-1.5 ${pendingRpeQueue.length === 0 ? 'text-teal-400' : 'text-orange-400'}`}>{liftCompleteMessage}</p>}
                                 {dayLog.liftCompletedAt ? (
                                   <p className="text-xs text-teal-400 font-bold flex items-center gap-1"><Check size={13} />Lift completed</p>
                                 ) : (
