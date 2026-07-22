@@ -7,21 +7,20 @@ import {
 
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const INJURY_AREAS = ['Knee', 'Lower back', 'Shoulder', 'Elbow', 'Wrist', 'Hip', 'Ankle', 'Hamstring', 'Achilles', 'Neck', 'Other'];
+const RUN_GOAL_LABELS = { '5k': '5K', '10k': '10K', half: 'Half Marathon', marathon: 'Marathon', general: 'General Endurance' };
+const SCHEDULE_LABELS = { lift: 'Lift', run: 'Run', lift_run: 'Lift + Run', rest: 'Rest', active_recovery: 'Active Recovery' };
+const ACTIVITY_LABELS = { sedentary: 'Sedentary', light: 'Light', moderate: 'Moderate', active: 'Active', veryActive: 'Very Active' };
 const DIST_MILES = { '5k': 3.1069, '2mi': 2, '10k': 6.2137, half: 13.1094, marathon: 26.2188 };
 
 // ---------- storage helpers ----------
 async function loadKey(key) {
-  try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : null; } catch (e) { return null; }
+  try { const r = await window.storage.get(key, false); return r ? JSON.parse(r.value) : null; } catch (e) { return null; }
 }
 async function saveKey(key, value) {
-  try { localStorage.setItem(key, JSON.stringify(value)); return true; } catch (e) { console.error('storage save failed', e); return false; }
+  try { const result = await window.storage.set(key, JSON.stringify(value), false); return !!result; } catch (e) { console.error('storage save failed', e); return false; }
 }
 async function listKeys(prefix) {
-  try {
-    const keys = [];
-    for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k && k.startsWith(prefix)) keys.push(k); }
-    return keys;
-  } catch (e) { return []; }
+  try { const r = await window.storage.list(prefix, false); return (r && r.keys) || []; } catch (e) { return []; }
 }
 
 // ---------- date helpers ----------
@@ -32,7 +31,12 @@ function getMonday(d = new Date()) {
   return date;
 }
 function addDays(date, n) { const d = new Date(date); d.setDate(d.getDate() + n); return d; }
-function dateKey(d) { return d.toISOString().slice(0, 10); }
+function dateKey(d) {
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
 function formatDate(d) { return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); }
 function todayKey() { return `food:${dateKey(new Date())}`; }
 
@@ -657,8 +661,9 @@ function analyzeRunUpload(runEntry, overall, profile) {
       feedback.push(`Overall pace: ${paceFromSeconds(actualPaceSec)}/mi${diff ? ` — ${diff.text} vs your ~${paceFromSeconds(prescribedPaceSec)}/mi target` : ''}`);
     }
   }
-  if (overall.avgHR && profile.age) {
-    const hrMax = 220 - profile.age;
+  const currentAge = calcAge(profile.birthday);
+  if (overall.avgHR && currentAge) {
+    const hrMax = 220 - currentAge;
     const pct = Math.round((overall.avgHR / hrMax) * 100);
     let note = `Average HR ${overall.avgHR} bpm (~${pct}% of estimated max ${hrMax}).`;
     if ((runEntry.type === 'Easy' || runEntry.type === 'Long') && pct > 78) note += ' Higher than typical for this effort — the pace may have been a bit hot for an easy day.';
@@ -784,7 +789,8 @@ function suggestOrder(runType, strengthGoal) {
 }
 
 // ---------- nutrition ----------
-function calcTDEE({ sex, age, heightIn, weightLb, activityLevel }) {
+function calcTDEE({ sex, birthday, heightIn, weightLb, activityLevel }) {
+  const age = calcAge(birthday) || 30;
   const weightKg = weightLb * 0.453592, heightCm = heightIn * 2.54;
   const bmr = sex === 'male' ? 10 * weightKg + 6.25 * heightCm - 5 * age + 5 : 10 * weightKg + 6.25 * heightCm - 5 * age - 161;
   const mult = { sedentary: 1.2, light: 1.375, moderate: 1.55, active: 1.725, veryActive: 1.9 }[activityLevel] || 1.55;
@@ -1026,6 +1032,14 @@ function monthsSince(month, year) {
   return (now.getFullYear() - year) * 12 + (now.getMonth() + 1 - month);
 }
 function currentMonthYear() { const now = new Date(); return { month: now.getMonth() + 1, year: now.getFullYear() }; }
+function calcAge(birthday) {
+  if (!birthday || !birthday.month || !birthday.day || !birthday.year) return null;
+  const today = new Date();
+  let age = today.getFullYear() - birthday.year;
+  const hadBirthdayThisYear = (today.getMonth() + 1 > birthday.month) || (today.getMonth() + 1 === birthday.month && today.getDate() >= birthday.day);
+  if (!hadBirthdayThisYear) age--;
+  return age;
+}
 function ageAdjustedOneRM(rawOneRM, since) {
   if (!rawOneRM || !since || !since.month || !since.year) return rawOneRM;
   const monthsAgo = monthsSince(since.month, since.year);
@@ -1155,7 +1169,7 @@ export default function HybridAthleteApp() {
 
   const emptySchedule = { Mon: 'rest', Tue: 'rest', Wed: 'rest', Thu: 'rest', Fri: 'rest', Sat: 'rest', Sun: 'rest' };
   const [form, setForm] = useState({
-    name: '', sex: 'male', age: 30, weightLb: 170, heightIn: 70, activityLevel: 'moderate',
+    name: '', sex: 'male', birthday: { month: 1, day: 1, year: new Date().getFullYear() - 30 }, weightLb: 170, heightIn: 70, activityLevel: 'moderate',
     trainingMode: 'hybrid', strengthGoal: 'hybrid', runGoal: 'general', experience: 'intermediate', equipment: 'barbell',
     splitType: 'upper_lower', schedule: { ...emptySchedule }, sessionLengthMin: 60, runDayTypes: {},
     lifts: { squat: { weight: '', reps: '', since: currentMonthYear() }, bench: { weight: '', reps: '', since: currentMonthYear() }, deadlift: { weight: '', reps: '', since: currentMonthYear() }, ohp: { weight: '', reps: '', since: currentMonthYear() } },
@@ -1759,11 +1773,18 @@ export default function HybridAthleteApp() {
           {setupStep === 0 && (
             <div className="space-y-3">
               <Field label="Name"><input value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} className={inputCls} /></Field>
-              <div className="grid grid-cols-2 gap-3">
-                <Field label="Sex"><select value={form.sex} onChange={e => setForm({ ...form, sex: e.target.value })} className={inputCls}><option value="male">Male</option><option value="female">Female</option></select></Field>
-                <div>
-                  <p className="text-xs text-zinc-400 mb-1">Age</p>
-                  <WheelPicker value={Number(form.age)} onChange={v => setForm({ ...form, age: v })} options={numRange(13, 90)} />
+              <Field label="Sex"><select value={form.sex} onChange={e => setForm({ ...form, sex: e.target.value })} className={inputCls}><option value="male">Male</option><option value="female">Female</option></select></Field>
+              <div>
+                <p className="text-xs text-zinc-400 mb-1">Birthday</p>
+                <div className="flex gap-2 text-[10px] text-zinc-500 uppercase tracking-wide mb-1">
+                  <span className="flex-1 text-center">month</span><span className="flex-1 text-center">day</span><span className="flex-1 text-center">year</span>
+                </div>
+                <div className="flex gap-2 bg-zinc-800 border border-zinc-700 rounded">
+                  <WheelPicker value={form.birthday.month} onChange={v => setForm({ ...form, birthday: { ...form.birthday, month: v } })} options={monthOptions()} />
+                  <div className="w-px bg-zinc-700" />
+                  <WheelPicker value={form.birthday.day} onChange={v => setForm({ ...form, birthday: { ...form.birthday, day: v } })} options={numRange(1, 31)} />
+                  <div className="w-px bg-zinc-700" />
+                  <WheelPicker value={form.birthday.year} onChange={v => setForm({ ...form, birthday: { ...form.birthday, year: v } })} options={yearOptions(90)} />
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-3">
@@ -2037,7 +2058,8 @@ export default function HybridAthleteApp() {
       { label: 'Squat', value: profile.oneRMs?.squat }, { label: 'Bench', value: profile.oneRMs?.bench },
       { label: 'Deadlift', value: profile.oneRMs?.deadlift }, { label: 'OHP', value: profile.oneRMs?.ohp }
     ];
-    const scheduleSummary = WEEKDAYS.filter(d => profile.schedule[d] !== 'rest').map(d => `${d}: ${profile.schedule[d].replace('_', '+')}`);
+    const scheduleSummary = WEEKDAYS.filter(d => profile.schedule[d] !== 'rest').map(d => `${d}: ${SCHEDULE_LABELS[profile.schedule[d]] || profile.schedule[d]}`);
+    const currentAge = calcAge(profile.birthday);
     return (
       <div className="min-h-screen bg-zinc-900 text-stone-100 p-4">
         <div className="max-w-sm mx-auto">
@@ -2050,10 +2072,10 @@ export default function HybridAthleteApp() {
               <SectionHeader>About</SectionHeader>
               <div className="grid grid-cols-2 gap-y-1.5 mt-2 text-sm">
                 {profile.name && <div className="col-span-2"><span className="text-zinc-500">Name</span> · {profile.name}</div>}
-                <div><span className="text-zinc-500">Age</span> · {profile.age}</div>
+                <div><span className="text-zinc-500">Age</span> · {currentAge != null ? currentAge : '—'}</div>
                 <div><span className="text-zinc-500">Weight</span> · {profile.weightLb} lb</div>
                 <div><span className="text-zinc-500">Height</span> · {Math.floor(profile.heightIn / 12)}'{profile.heightIn % 12}"</div>
-                <div><span className="text-zinc-500">Activity</span> · {profile.activityLevel}</div>
+                <div><span className="text-zinc-500">Activity</span> · {ACTIVITY_LABELS[profile.activityLevel] || profile.activityLevel}</div>
               </div>
             </Card>
             <Card>
@@ -2071,20 +2093,20 @@ export default function HybridAthleteApp() {
             <Card>
               <SectionHeader accent="teal">Training Setup</SectionHeader>
               <div className="space-y-1.5 mt-2 text-sm">
-                <div><span className="text-zinc-500">Mode</span> · {profile.trainingMode}</div>
+                <div><span className="text-zinc-500">Mode</span> · <span className="capitalize">{profile.trainingMode}</span></div>
                 {profile.strengthGoal && (
                   <div>
-                    <span className="text-zinc-500">Strength goal</span> · {profile.strengthGoal}
+                    <span className="text-zinc-500">Strength goal</span> · <span className="capitalize">{profile.strengthGoal}</span>
                     <p className="text-[11px] text-zinc-500 mt-0.5">Sets which rep ranges and set counts get picked, whether main lifts use reverse pyramid loading, and the load/volume note on each workout.</p>
                   </div>
                 )}
-                {profile.runGoal && <div><span className="text-zinc-500">Run goal</span> · {profile.runGoal}</div>}
-                <div><span className="text-zinc-500">Experience</span> · {profile.experience}</div>
-                <div><span className="text-zinc-500">Equipment</span> · {profile.equipment}</div>
+                {profile.runGoal && <div><span className="text-zinc-500">Run goal</span> · {RUN_GOAL_LABELS[profile.runGoal] || profile.runGoal}</div>}
+                <div><span className="text-zinc-500">Experience</span> · <span className="capitalize">{profile.experience}</span></div>
+                <div><span className="text-zinc-500">Equipment</span> · <span className="capitalize">{profile.equipment}</span></div>
                 {profile.splitType && <div><span className="text-zinc-500">Split</span> · {splitFamilies[profile.splitType]?.label}</div>}
                 {profile.sessionLengthMin && <div><span className="text-zinc-500">Session length</span> · {profile.sessionLengthMin} min</div>}
                 {profile.currentWeeklyMileage != null && <div><span className="text-zinc-500">Weekly mileage</span> · {profile.currentWeeklyMileage} mi</div>}
-                <div><span className="text-zinc-500">Nutrition goal</span> · {profile.nutritionGoal}</div>
+                <div><span className="text-zinc-500">Nutrition goal</span> · <span className="capitalize">{profile.nutritionGoal}</span></div>
               </div>
             </Card>
             <Card>
