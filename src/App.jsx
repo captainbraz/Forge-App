@@ -91,6 +91,23 @@ const exercisePool = {
   pushAccessory: { barbell: ['Rope Tricep Pushdown', 'EZ-Bar Skullcrusher', 'Close-Grip Bench Press'], dumbbell: ['Single-Arm Dumbbell Tricep Extension', 'DB Lateral Raise'], bodyweight: ['Dip', 'Pike Push-Up'] },
   pullAccessory: { barbell: ['Barbell Curl', 'EZ-Bar Curl', 'Cable Bicep Curl', 'Cable Double Bicep Curl'], dumbbell: ['Dumbbell Bicep Curl', 'Hammer Curl', 'Dumbbell Concentration Curl'], bodyweight: ['Chin-Up'] }
 };
+const PATTERN_LABELS = {
+  squat: 'Squat (quads)', hinge: 'Hinge (hamstrings/glutes)', pushHoriz: 'Horizontal push (chest)', chestFly: 'Chest fly/isolation',
+  pushVert: 'Vertical push (shoulders)', pullHoriz: 'Horizontal pull (back)', pullVert: 'Vertical pull (back)', rearDelt: 'Rear delt',
+  core: 'Core', legAccessory: 'Leg accessory', pushAccessory: 'Push accessory (triceps)', pullAccessory: 'Pull accessory (biceps)'
+};
+function poolFor(pattern, equipment, customExercises) {
+  const base = exercisePool[pattern][equipment] || exercisePool[pattern].bodyweight;
+  const custom = (customExercises || [])
+    .filter(c => c.pattern === pattern && c.equipment === equipment)
+    .map(c => c.name);
+  return [...base, ...custom];
+}
+function allCatalogNames() {
+  const names = new Set();
+  Object.values(exercisePool).forEach(tiers => Object.values(tiers).forEach(list => list.forEach(n => names.add(n))));
+  return [...names];
+}
 // Per-exercise sets/rep-range options/style/drop-set guidance. Falls back to the generic goal-based scheme when an exercise isn't listed.
 const exerciseSpecs = {
   'Back Squat': { setsRange: [3, 5], repOptions: [[3, 5], [5, 8], [8, 12]], style: 'either', dropSet: 'no' },
@@ -269,7 +286,10 @@ const splitFamilies = {
   full_body: { label: 'Full Body', sequence: ['Full Body A', 'Full Body B', 'Full Body C'] },
   upper_lower: { label: 'Upper / Lower', sequence: ['Upper A', 'Lower A', 'Upper B', 'Lower B'] },
   ppl: { label: 'Push / Pull / Legs', sequence: ['Push', 'Pull', 'Legs'] },
-  ppl_fb: { label: 'Push / Pull / Legs / Full Body', sequence: ['Push', 'Pull', 'Legs', 'Full Body A'], onlyForDayCount: 4 }
+  ppl_fb: { label: 'Push / Pull / Legs / Full Body', sequence: ['Push', 'Pull', 'Legs', 'Full Body A'], onlyForDayCount: 4 },
+  bro_split: { label: 'Body Part Split', sequence: ['Chest', 'Back', 'Shoulders', 'Legs', 'Arms'], onlyForDayCount: 5 },
+  arnold: { label: 'Arnold Split', sequence: ['Chest & Back A', 'Shoulders & Arms A', 'Legs A', 'Chest & Back B', 'Shoulders & Arms B', 'Legs B'], onlyForDayCount: 6 },
+  phul: { label: 'Power Hypertrophy Upper Lower (PHUL)', sequence: ['Power Upper', 'Power Lower', 'Hyper Upper', 'Hyper Lower'], onlyForDayCount: 4 }
 };
 const patternsByDayType = {
   'Full Body A': ['squat', 'pushHoriz', 'pullHoriz', 'core'],
@@ -281,7 +301,25 @@ const patternsByDayType = {
   'Lower B': ['hinge', 'squat', 'legAccessory', 'core'],
   Push: ['pushHoriz', 'pushVert', 'chestFly', 'pushAccessory'],
   Pull: ['pullHoriz', 'pullVert', 'rearDelt', 'pullAccessory'],
-  Legs: ['squat', 'hinge', 'legAccessory', 'core']
+  Legs: ['squat', 'hinge', 'legAccessory', 'core'],
+  Chest: ['pushHoriz', 'chestFly', 'pushHoriz'],
+  Back: ['pullHoriz', 'pullVert', 'rearDelt'],
+  Shoulders: ['pushVert', 'rearDelt', 'pushVert'],
+  Arms: ['pushAccessory', 'pullAccessory', 'pushAccessory', 'pullAccessory'],
+  'Chest & Back A': ['pushHoriz', 'pullHoriz', 'chestFly', 'pullVert'],
+  'Chest & Back B': ['pullHoriz', 'pushHoriz', 'pullVert', 'chestFly'],
+  'Shoulders & Arms A': ['pushVert', 'rearDelt', 'pushAccessory', 'pullAccessory'],
+  'Shoulders & Arms B': ['pushVert', 'pushAccessory', 'pullAccessory', 'rearDelt'],
+  'Legs A': ['squat', 'hinge', 'legAccessory', 'core'],
+  'Legs B': ['hinge', 'squat', 'legAccessory', 'core']
+};
+// PHUL reuses Upper/Lower's movement patterns verbatim — only the rep scheme differs (see dayTypeGoalOverride)
+patternsByDayType['Power Upper'] = patternsByDayType['Upper A'];
+patternsByDayType['Power Lower'] = patternsByDayType['Lower A'];
+patternsByDayType['Hyper Upper'] = patternsByDayType['Upper B'];
+patternsByDayType['Hyper Lower'] = patternsByDayType['Lower B'];
+const dayTypeGoalOverride = {
+  'Power Upper': 'strength', 'Power Lower': 'strength', 'Hyper Upper': 'hypertrophy', 'Hyper Lower': 'hypertrophy'
 };
 function repSchemeFor(goal) {
   return {
@@ -313,13 +351,13 @@ function setRowLabel(ex, si) {
   if (si < warmupOffset + ex.sets) return { label: `Set ${si - warmupOffset + 1}`, color: 'text-zinc-500' };
   return { label: `Drop ${si - warmupOffset - ex.sets + 1}`, color: 'text-amber-500' };
 }
-function buildDayExercises(dayType, seqIndex, { equipment, goal, oneRMs, learnedOneRMs }) {
+function buildDayExercises(dayType, seqIndex, { equipment, goal, oneRMs, learnedOneRMs, customExercises }) {
   const patterns = patternsByDayType[dayType] || patternsByDayType['Full Body A'];
   const repScheme = repSchemeFor(goal);
   const occurrenceByPattern = {};
   const seenMuscleGroups = new Set();
   return patterns.map((pattern, i) => {
-    const pool = exercisePool[pattern][equipment] || exercisePool[pattern].bodyweight;
+    const pool = poolFor(pattern, equipment, customExercises);
     const occurrence = occurrenceByPattern[pattern] || 0;
     occurrenceByPattern[pattern] = occurrence + 1;
     const name = pool[(seqIndex + occurrence) % pool.length];
@@ -360,20 +398,27 @@ function trimToTimeBudget(exercises, targetMinutes) {
   }
   return list;
 }
+const accessoryPatternOverride = {
+  'Back': 'pullAccessory', 'Shoulders': 'pushAccessory', 'Arms': 'pullAccessory',
+  'Power Lower': 'legAccessory', 'Hyper Lower': 'legAccessory',
+  'Chest & Back A': 'pullAccessory', 'Chest & Back B': 'pullAccessory',
+  'Shoulders & Arms A': 'pushAccessory', 'Shoulders & Arms B': 'pushAccessory'
+};
 function accessoryPatternForDayType(dayType) {
+  if (accessoryPatternOverride[dayType]) return accessoryPatternOverride[dayType];
   if (dayType.startsWith('Push')) return 'pushAccessory';
   if (dayType.startsWith('Pull')) return 'pullAccessory';
   if (dayType.startsWith('Legs') || dayType.startsWith('Lower')) return 'legAccessory';
   return 'pushAccessory';
 }
-function padToTimeBudget(exercises, targetMinutes, dayType, seqIndex, { equipment, goal, oneRMs, learnedOneRMs }) {
+function padToTimeBudget(exercises, targetMinutes, dayType, seqIndex, { equipment, goal, oneRMs, learnedOneRMs, customExercises }) {
   let list = [...exercises];
   const repScheme = repSchemeFor(goal);
   const patternKey = accessoryPatternForDayType(dayType);
   const seenMuscleGroups = new Set(list.map(e => e.muscleGroup));
   let guard = 0;
   while (estimateSessionMinutes(list) < targetMinutes - 15 && list.length < 7 && guard < 3) {
-    const pool = exercisePool[patternKey][equipment] || exercisePool[patternKey].bodyweight;
+    const pool = poolFor(patternKey, equipment, customExercises);
     const usedNames = new Set(list.map(e => e.name));
     const freshName = pool.find(n => !usedNames.has(n));
     if (!freshName) break;
@@ -452,18 +497,20 @@ function evaluateExerciseLog(exercise, log) {
   }
   return null;
 }
+function bestOneRMFromSets(sets) {
+  let best = null;
+  (sets || []).forEach(s => {
+    if (!s || !s.done) return;
+    const w = Number(s.weight), r = Number(s.reps);
+    if (!w || !r) return;
+    const rm = epley1RM(w, r);
+    if (rm && (!best || rm > best)) best = rm;
+  });
+  return best;
+}
 function computeLearnedOneRM(exercise, log) {
   const warmupOffset = exercise.needsWarmup ? 1 : 0;
-  let best = null;
-  for (let i = warmupOffset; i < warmupOffset + exercise.sets; i++) {
-    const s = log.sets[i];
-    if (!s || !s.done) continue;
-    const w = Number(s.weight), r = Number(s.reps);
-    if (!w || !r) continue;
-    const oneRM = epley1RM(w, r);
-    if (oneRM && (!best || oneRM > best)) best = oneRM;
-  }
-  return best;
+  return bestOneRMFromSets(log.sets.slice(warmupOffset, warmupOffset + exercise.sets));
 }
 function patternForExerciseName(name) {
   for (const [pattern, tiers] of Object.entries(exercisePool)) {
@@ -480,23 +527,19 @@ function currentOneRMFor(name, profile, bestHistorical) {
 }
 function aggregateExerciseStats(logs, profile) {
   const byName = {};
+  const record = (date, name, sets, rpe) => {
+    if (!name) return;
+    const workingSets = sets.filter(s => s.done && s.weight && s.reps);
+    if (workingSets.length === 0) return;
+    const bestOneRM = bestOneRMFromSets(workingSets);
+    if (!byName[name]) byName[name] = { count: 0, history: [], bestOneRM: null };
+    byName[name].count += 1;
+    byName[name].history.push({ date, sets: workingSets, oneRM: bestOneRM, rpe });
+    if (bestOneRM && (!byName[name].bestOneRM || bestOneRM > byName[name].bestOneRM)) byName[name].bestOneRM = bestOneRM;
+  };
   logs.forEach(log => {
-    if (!log.lift) return;
-    Object.values(log.lift).forEach(exLog => {
-      const name = exLog.swappedName || exLog.name;
-      if (!name) return;
-      const workingSets = exLog.sets.filter(s => s.done && s.weight && s.reps);
-      if (workingSets.length === 0) return;
-      let bestOneRM = null;
-      workingSets.forEach(s => {
-        const rm = epley1RM(Number(s.weight), Number(s.reps));
-        if (rm && (!bestOneRM || rm > bestOneRM)) bestOneRM = rm;
-      });
-      if (!byName[name]) byName[name] = { count: 0, history: [], bestOneRM: null };
-      byName[name].count += 1;
-      byName[name].history.push({ date: log.date, sets: workingSets, oneRM: bestOneRM, rpe: exLog.rpe });
-      if (bestOneRM && (!byName[name].bestOneRM || bestOneRM > byName[name].bestOneRM)) byName[name].bestOneRM = bestOneRM;
-    });
+    if (log.lift) Object.values(log.lift).forEach(exLog => record(log.date, exLog.swappedName || exLog.name, exLog.sets, exLog.rpe));
+    (log.independentLift || []).forEach(entry => record(log.date, entry.name, entry.sets, entry.rpe));
   });
   Object.entries(byName).forEach(([name, entry]) => {
     entry.history.sort((a, b) => b.date.localeCompare(a.date));
@@ -510,21 +553,25 @@ function aggregateRunStats(logs, profile) {
   const warmupPaces = [];
   const cooldownPaces = [];
   logs.forEach(l => {
-    if (!l.run) return;
-    let distance = null, time = null;
-    if (l.run.warmup) {
-      let dist = 0, sec = 0;
-      const addPhase = (p) => { if (p && p.distance && p.time) { const s = timeStrToSeconds(p.time); if (s != null) { dist += Number(p.distance); sec += s; } } };
-      addPhase(l.run.warmup); addPhase(l.run.cooldown);
-      if (l.run.tempo) addPhase(l.run.tempo);
-      if (l.run.intervals) l.run.intervals.forEach(iv => { const s = iv && timeStrToSeconds(iv.time); if (s != null) { sec += s; dist += spec.intervalMiles; } });
-      if (dist > 0) { distance = +dist.toFixed(2); time = secondsToTimeStr(sec); }
-      if (l.run.warmup.distance && l.run.warmup.time) { const p = actualPaceSeconds(l.run.warmup.distance, l.run.warmup.time); if (p) warmupPaces.push(p); }
-      if (l.run.cooldown && l.run.cooldown.distance && l.run.cooldown.time) { const p = actualPaceSeconds(l.run.cooldown.distance, l.run.cooldown.time); if (p) cooldownPaces.push(p); }
-    } else if (l.run.time && l.run.distance) {
-      distance = Number(l.run.distance); time = l.run.time;
+    if (l.run) {
+      let distance = null, time = null;
+      if (l.run.warmup) {
+        let dist = 0, sec = 0;
+        const addPhase = (p) => { if (p && p.distance && p.time) { const s = timeStrToSeconds(p.time); if (s != null) { dist += Number(p.distance); sec += s; } } };
+        addPhase(l.run.warmup); addPhase(l.run.cooldown);
+        if (l.run.tempo) addPhase(l.run.tempo);
+        if (l.run.intervals) l.run.intervals.forEach(iv => { const s = iv && timeStrToSeconds(iv.time); if (s != null) { sec += s; dist += spec.intervalMiles; } });
+        if (dist > 0) { distance = +dist.toFixed(2); time = secondsToTimeStr(sec); }
+        if (l.run.warmup.distance && l.run.warmup.time) { const p = actualPaceSeconds(l.run.warmup.distance, l.run.warmup.time); if (p) warmupPaces.push(p); }
+        if (l.run.cooldown && l.run.cooldown.distance && l.run.cooldown.time) { const p = actualPaceSeconds(l.run.cooldown.distance, l.run.cooldown.time); if (p) cooldownPaces.push(p); }
+      } else if (l.run.time && l.run.distance) {
+        distance = Number(l.run.distance); time = l.run.time;
+      }
+      if (distance && time) runs.push({ date: l.date, distance, time, effort: l.run.effort, notes: l.run.notes });
     }
-    if (distance && time) runs.push({ date: l.date, distance, time, effort: l.run.effort, notes: l.run.notes });
+    (l.independentRun || []).forEach(entry => {
+      if (entry.distance && entry.time) runs.push({ date: l.date, distance: Number(entry.distance), time: entry.time, effort: entry.effort, notes: entry.notes });
+    });
   });
   runs.sort((a, b) => b.date.localeCompare(a.date));
   const totalDistance = runs.reduce((sum, r) => sum + (r.distance || 0), 0);
@@ -757,8 +804,23 @@ function liftDayPurpose(dayType, strengthGoal) {
     'Lower B': 'Second leg day — different squat/hinge emphasis so the same muscles get hit from a new angle.',
     Push: 'Chest, shoulders, and triceps — the pushing muscles trained together for efficient recovery before they\'re hit again.',
     Pull: 'Back and biceps — balances your pushing volume and keeps shoulder health in check.',
-    Legs: 'Quads, hamstrings, glutes, and core — the biggest muscles in the body and the base of total-body strength.'
+    Legs: 'Quads, hamstrings, glutes, and core — the biggest muscles in the body and the base of total-body strength.',
+    Chest: 'A dedicated chest day — maximum volume for one muscle group before it gets a full week to recover.',
+    Back: 'A dedicated back day — width and thickness work without competing for recovery with pressing muscles.',
+    Shoulders: 'A dedicated shoulder day — direct pressing and rear delt work for balanced, injury-resistant shoulders.',
+    Arms: 'Biceps and triceps direct work — the finishing detail day after the bigger muscle groups have been trained.',
+    'Chest & Back A': 'Chest and back paired — opposing pushing/pulling muscles trained together, first pass of the week.',
+    'Chest & Back B': 'Second chest and back session — different exercise order and emphasis from earlier in the week.',
+    'Shoulders & Arms A': 'Shoulders, biceps, and triceps together — first pass of the week\'s arm and shoulder work.',
+    'Shoulders & Arms B': 'Second shoulders and arms session — different order and emphasis from earlier in the week.',
+    'Legs A': 'Quads, hamstrings, glutes, and core — first leg day of the week.',
+    'Legs B': 'Second leg day — different squat/hinge emphasis so the same muscles get hit from a new angle.',
+    'Power Upper': 'Heavy, low-rep upper body work — the strength half of PHUL, building the base your hypertrophy day builds on.',
+    'Power Lower': 'Heavy, low-rep squat/hinge work — the strength half of PHUL for your legs.',
+    'Hyper Upper': 'Higher-rep, higher-volume upper body work — the muscle-building half of PHUL.',
+    'Hyper Lower': 'Higher-rep, higher-volume leg work — the muscle-building half of PHUL.'
   }[dayType] || 'A structured session built around your split.';
+  if (dayTypeGoalOverride[dayType]) return base;
   const goalNote = { strength: ' Heavier loads, lower reps — built for max strength.', hypertrophy: ' Moderate loads, higher volume — built for muscle growth.', hybrid: ' A blend of load and volume to support both strength and your running.' }[strengthGoal] || '';
   return base + goalNote;
 }
@@ -837,18 +899,39 @@ function estimateRunCalories(runEntry, log, profile) {
   const distance = Number(totals.distance) || 0;
   return weightKg * 1.036 * 1.60934 * distance;
 }
+function estimateIndependentLiftCalories(log, profile) {
+  if (!log || !log.independentLift || log.independentLift.length === 0) return 0;
+  const weightKg = profile.weightLb * 0.453592;
+  let minutes = 0, rpeSum = 0, rpeCount = 0;
+  log.independentLift.forEach(entry => {
+    const doneSets = (entry.sets || []).filter(s => s.done).length;
+    minutes += doneSets * (compoundPatterns.has(entry.pattern) ? 3.5 : 2);
+    if (entry.rpe != null) { rpeSum += entry.rpe; rpeCount++; }
+  });
+  const avgRpe = rpeCount ? rpeSum / rpeCount : 7;
+  const met = 3.5 + Math.min(1, Math.max(0, (avgRpe - 5) / 5)) * 3;
+  return met * weightKg * (minutes / 60);
+}
+function estimateIndependentRunCalories(log, profile) {
+  if (!log || !log.independentRun || log.independentRun.length === 0) return 0;
+  const weightKg = profile.weightLb * 0.453592;
+  const totalDistance = log.independentRun.reduce((sum, entry) => sum + (Number(entry.distance) || 0), 0);
+  return weightKg * 1.036 * 1.60934 * totalDistance;
+}
 
 // ---------- plan generation pipeline ----------
 function buildLiftTemplate(profile, oneRMs) {
   const liftDays = WEEKDAYS.filter(d => profile.schedule[d] === 'lift' || profile.schedule[d] === 'lift_run');
   const family = splitFamilies[profile.splitType] || splitFamilies.full_body;
   const learnedOneRMs = profile.learnedOneRMs || {};
+  const customExercises = profile.customExercises || [];
   return liftDays.map((weekday, i) => {
     const dayType = family.sequence[i % family.sequence.length];
-    let exercises = buildDayExercises(dayType, i, { equipment: profile.equipment, goal: profile.strengthGoal, oneRMs, learnedOneRMs });
+    const goal = dayTypeGoalOverride[dayType] || profile.strengthGoal;
+    let exercises = buildDayExercises(dayType, i, { equipment: profile.equipment, goal, oneRMs, learnedOneRMs, customExercises });
     const budget = Number(profile.sessionLengthMin) || 60;
     exercises = trimToTimeBudget(exercises, budget);
-    exercises = padToTimeBudget(exercises, budget, dayType, i, { equipment: profile.equipment, goal: profile.strengthGoal, oneRMs, learnedOneRMs });
+    exercises = padToTimeBudget(exercises, budget, dayType, i, { equipment: profile.equipment, goal, oneRMs, learnedOneRMs, customExercises });
     return { weekday, dayType, exercises };
   });
 }
@@ -896,13 +979,13 @@ function detectConflicts(liftTemplate, injuries) {
   });
   return conflicts;
 }
-function swapExercise(liftTemplate, weekday, exerciseId, equipment, goal, oneRMs, learnedOneRMs) {
+function swapExercise(liftTemplate, weekday, exerciseId, equipment, goal, oneRMs, learnedOneRMs, customExercises) {
   return liftTemplate.map(day => {
     if (day.weekday !== weekday) return day;
     return {
       ...day, exercises: day.exercises.map(ex => {
         if (ex.id !== exerciseId) return ex;
-        const pool = exercisePool[ex.pattern][equipment] || exercisePool[ex.pattern].bodyweight;
+        const pool = poolFor(ex.pattern, equipment, customExercises);
         const currentIdx = pool.indexOf(ex.name);
         const nextName = pool[(currentIdx + 1) % pool.length];
         const prescription = prescriptionFor(nextName, goal);
@@ -991,7 +1074,7 @@ function buildLogSkeleton(entry) {
     };
   });
   const run = entry.run ? buildRunLogSkeleton(entry.run) : null;
-  return { lift, run, liftCompletedAt: null, runCompletedAt: null };
+  return { lift, run, liftCompletedAt: null, runCompletedAt: null, independentLift: [], independentRun: [], liftOverride: null, runOverride: null };
 }
 function mergeLog(skeleton, saved) {
   if (!saved) return skeleton;
@@ -1009,7 +1092,11 @@ function mergeLog(skeleton, saved) {
     }
     // shape mismatch (e.g. old flat log from before phases existed, or run type changed on regeneration) — discard stale data, start fresh rather than crash
   }
-  return { lift, run, liftCompletedAt: saved.liftCompletedAt || null, runCompletedAt: saved.runCompletedAt || null };
+  return {
+    lift, run, liftCompletedAt: saved.liftCompletedAt || null, runCompletedAt: saved.runCompletedAt || null,
+    independentLift: saved.independentLift || [], independentRun: saved.independentRun || [],
+    liftOverride: saved.liftOverride || null, runOverride: saved.runOverride || null
+  };
 }
 
 // ---------- UI atoms ----------
@@ -1139,6 +1226,60 @@ function DualWheelPicker({ leftLabel, rightLabel, leftOptions, rightOptions, lef
     </div>
   );
 }
+function emptyIndependentExerciseRow() { return { query: '', name: null, pattern: null, equipment: null, isNew: false, sets: [{ weight: '', reps: '' }], rpe: null }; }
+function emptyIndependentDraft() {
+  return {
+    liftExercises: [], liftOverride: 'keep',
+    logRun: false, runType: 'Easy', runDistance: '', runTime: '', runEffort: null, runNotes: '', runOverride: 'keep'
+  };
+}
+function ExerciseCombobox({ row, onChange, customExercises, defaultEquipment }) {
+  const catalog = allCatalogNames();
+  const customNames = (customExercises || []).map(c => c.name);
+  const allNames = [...catalog, ...customNames];
+  const query = row.query || '';
+  const matches = query ? allNames.filter(n => n.toLowerCase().includes(query.toLowerCase())).slice(0, 8) : [];
+  const exactMatch = allNames.some(n => n.toLowerCase() === query.toLowerCase());
+  return (
+    <div>
+      {row.name ? (
+        <div className="flex items-center justify-between bg-zinc-800 border border-zinc-700 rounded px-2 py-1.5">
+          <span className="text-sm">{row.name}{row.isNew && <span className="text-[10px] text-teal-400 uppercase ml-1.5">new</span>}</span>
+          <button onClick={() => onChange({ ...row, name: null, pattern: null, isNew: false, query: '' })} className="text-zinc-500"><X size={14} /></button>
+        </div>
+      ) : (
+        <div>
+          <input
+            placeholder="Search or type an exercise name"
+            value={query}
+            onChange={e => onChange({ ...row, query: e.target.value })}
+            className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1.5 text-sm"
+          />
+          {query && (
+            <div className="mt-1 space-y-1">
+              {matches.map(n => (
+                <button key={n} onClick={() => onChange({ ...row, name: n, pattern: patternForExerciseName(n) || (customExercises || []).find(c => c.name === n)?.pattern || null, isNew: false, query: '' })}
+                  className="w-full text-left px-2 py-1 text-xs bg-zinc-900 border border-zinc-700 rounded hover:bg-zinc-700">{n}</button>
+              ))}
+              {!exactMatch && (
+                <div className="bg-zinc-900 border border-dashed border-teal-600/50 rounded p-2 space-y-1.5">
+                  <p className="text-[11px] text-teal-400">+ Add "{query}" as a new exercise</p>
+                  <select defaultValue="" onChange={e => {
+                    if (!e.target.value) return;
+                    onChange({ ...row, name: query, pattern: e.target.value, equipment: defaultEquipment, isNew: true, query: '' });
+                  }} className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs">
+                    <option value="" disabled>Pick a movement pattern...</option>
+                    {Object.entries(PATTERN_LABELS).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
+                  </select>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 export default function HybridAthleteApp() {
   const [loading, setLoading] = useState(true);
@@ -1191,6 +1332,9 @@ export default function HybridAthleteApp() {
   const [showFoodForm, setShowFoodForm] = useState(false);
   const [foodDraft, setFoodDraft] = useState({ name: '', kcal: '', protein: '', carbs: '', fat: '' });
   const [todayFood, setTodayFood] = useState([]);
+
+  const [showIndependentForm, setShowIndependentForm] = useState(false);
+  const [independentDraft, setIndependentDraft] = useState(emptyIndependentDraft());
 
   useEffect(() => {
     (async () => {
@@ -1395,6 +1539,17 @@ export default function HybridAthleteApp() {
       return { ...log, lift: { ...log.lift, [exId]: { ...ex, sets: newSets } } };
     });
   }
+  function applyLearnedOneRM(name, pattern, learned) {
+    const nextLearned = { ...(profile.learnedOneRMs || {}), [name]: learned };
+    const directKey = known1RMPatterns[pattern];
+    const isPrimary = directKey && primaryExerciseForPattern[pattern] === name;
+    const nextOneRMs = isPrimary ? { ...(profile.oneRMs || {}), [directKey]: learned } : profile.oneRMs;
+    const nextProfile = { ...profile, learnedOneRMs: nextLearned, oneRMs: nextOneRMs };
+    setProfile(nextProfile); saveKey('profile', nextProfile);
+    const nextCalendar = recalculateFutureWeights(calendar, nextProfile, todayStr);
+    setCalendar(nextCalendar); saveKey('calendar', nextCalendar);
+    return nextProfile;
+  }
   function setExerciseRpe(ex, n) {
     const nextExLog = { ...dayLog.lift[ex.id], rpe: n };
     updateDayLog(log => ({ ...log, lift: { ...log.lift, [ex.id]: nextExLog } }));
@@ -1405,20 +1560,11 @@ export default function HybridAthleteApp() {
       setSuggestions(next); saveKey('suggestions', next);
     }
     const learned = computeLearnedOneRM(ex, nextExLog);
-    if (learned) {
-      const nextLearned = { ...(profile.learnedOneRMs || {}), [exerciseName]: learned };
-      const directKey = known1RMPatterns[ex.pattern];
-      const isPrimary = directKey && primaryExerciseForPattern[ex.pattern] === exerciseName;
-      const nextOneRMs = isPrimary ? { ...(profile.oneRMs || {}), [directKey]: learned } : profile.oneRMs;
-      const nextProfile = { ...profile, learnedOneRMs: nextLearned, oneRMs: nextOneRMs };
-      setProfile(nextProfile); saveKey('profile', nextProfile);
-      const nextCalendar = recalculateFutureWeights(calendar, nextProfile, todayStr);
-      setCalendar(nextCalendar); saveKey('calendar', nextCalendar);
-    }
+    if (learned) applyLearnedOneRM(exerciseName, ex.pattern, learned);
   }
   function swapToday(exId, ex, currentName) {
     updateDayLog(log => {
-      const pool = exercisePool[ex.pattern][profile.equipment] || exercisePool[ex.pattern].bodyweight;
+      const pool = poolFor(ex.pattern, profile.equipment, profile.customExercises || []);
       const idx = pool.indexOf(currentName);
       const nextName = pool[(idx + 1) % pool.length];
       const prescription = prescriptionFor(nextName, profile.strengthGoal);
@@ -1441,6 +1587,104 @@ export default function HybridAthleteApp() {
       const sets = skipped ? exLog.sets.map(s => ({ ...s, done: false })) : exLog.sets;
       return { ...log, lift: { ...log.lift, [exId]: { ...exLog, skipped, sets, rpe: skipped ? null : exLog.rpe } } };
     });
+  }
+  function addIndependentExerciseRow() {
+    setIndependentDraft(d => ({ ...d, liftExercises: [...d.liftExercises, emptyIndependentExerciseRow()] }));
+  }
+  function updateIndependentExerciseRow(idx, nextRow) {
+    setIndependentDraft(d => ({ ...d, liftExercises: d.liftExercises.map((r, i) => i === idx ? nextRow : r) }));
+  }
+  function removeIndependentExerciseRow(idx) {
+    setIndependentDraft(d => ({ ...d, liftExercises: d.liftExercises.filter((_, i) => i !== idx) }));
+  }
+  function updateIndependentSet(idx, si, field, value) {
+    setIndependentDraft(d => ({
+      ...d, liftExercises: d.liftExercises.map((r, i) => i === idx ? { ...r, sets: r.sets.map((s, j) => j === si ? { ...s, [field]: value } : s) } : r)
+    }));
+  }
+  function addIndependentSet(idx) {
+    setIndependentDraft(d => ({ ...d, liftExercises: d.liftExercises.map((r, i) => i === idx ? { ...r, sets: [...r.sets, { weight: '', reps: '' }] } : r) }));
+  }
+  function removeIndependentSet(idx, si) {
+    setIndependentDraft(d => ({ ...d, liftExercises: d.liftExercises.map((r, i) => i === idx ? { ...r, sets: r.sets.filter((_, j) => j !== si) } : r) }));
+  }
+  async function saveIndependentWorkout(entry) {
+    const date = entry.date;
+    const currentLog = logsByDate[date] || buildLogSkeleton(entry);
+    const newCustom = [];
+    const existingNames = new Set([...allCatalogNames(), ...(profile.customExercises || []).map(c => c.name)].map(n => n.toLowerCase()));
+    const independentLift = independentDraft.liftExercises
+      .filter(row => row.name && row.sets.some(s => s.weight && s.reps))
+      .map(row => {
+        if (row.isNew && !existingNames.has(row.name.toLowerCase())) {
+          newCustom.push({ name: row.name, pattern: row.pattern, equipment: row.equipment || profile.equipment, addedAt: new Date().toISOString() });
+          existingNames.add(row.name.toLowerCase());
+        }
+        return {
+          id: `indep-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          name: row.name, pattern: row.pattern,
+          sets: row.sets.filter(s => s.weight && s.reps).map(s => ({ weight: String(s.weight), reps: String(s.reps), done: true })),
+          rpe: row.rpe
+        };
+      });
+    const independentRun = (independentDraft.logRun && independentDraft.runDistance && independentDraft.runTime)
+      ? [{ id: `indep-run-${Date.now()}`, type: independentDraft.runType, distance: independentDraft.runDistance, time: independentDraft.runTime, effort: independentDraft.runEffort, notes: independentDraft.runNotes }]
+      : [];
+
+    let nextLog = {
+      ...currentLog,
+      independentLift: [...(currentLog.independentLift || []), ...independentLift],
+      independentRun: [...(currentLog.independentRun || []), ...independentRun],
+      liftOverride: entry.lift ? independentDraft.liftOverride : currentLog.liftOverride,
+      runOverride: entry.run ? independentDraft.runOverride : currentLog.runOverride
+    };
+    if (entry.lift && independentDraft.liftOverride === 'replace' && independentLift.length) {
+      const skippedLift = {};
+      Object.entries(nextLog.lift).forEach(([id, exLog]) => {
+        skippedLift[id] = { ...exLog, skipped: true, rpe: null, sets: exLog.sets.map(s => ({ ...s, done: false })) };
+      });
+      nextLog = { ...nextLog, lift: skippedLift };
+    }
+
+    setLogsByDate(prev => ({ ...prev, [date]: nextLog }));
+    saveKey(`log:${date}`, nextLog).then(ok => setSaveError(!ok));
+
+    let nextProfile = profile;
+    if (newCustom.length) nextProfile = { ...nextProfile, customExercises: [...(nextProfile.customExercises || []), ...newCustom] };
+    let learnedChanged = false;
+    const nextLearned = { ...(nextProfile.learnedOneRMs || {}) };
+    let nextOneRMs = nextProfile.oneRMs;
+    independentLift.forEach(exLog => {
+      const learned = bestOneRMFromSets(exLog.sets);
+      if (learned) {
+        learnedChanged = true;
+        nextLearned[exLog.name] = learned;
+        const directKey = known1RMPatterns[exLog.pattern];
+        const isPrimary = directKey && primaryExerciseForPattern[exLog.pattern] === exLog.name;
+        if (isPrimary) nextOneRMs = { ...(nextOneRMs || {}), [directKey]: learned };
+      }
+    });
+    if (learnedChanged) nextProfile = { ...nextProfile, learnedOneRMs: nextLearned, oneRMs: nextOneRMs };
+    if (nextProfile !== profile) {
+      setProfile(nextProfile); saveKey('profile', nextProfile);
+      if (learnedChanged) {
+        const nextCalendar = recalculateFutureWeights(calendar, nextProfile, todayStr);
+        setCalendar(nextCalendar); saveKey('calendar', nextCalendar);
+      }
+    }
+
+    if (independentRun.length && entry.run) {
+      const evaluation = evaluateRunLog(entry.run, { distance: independentRun[0].distance, time: independentRun[0].time, effort: independentRun[0].effort });
+      if (evaluation) {
+        const key = `run-${entry.weekday}`;
+        const nextSuggestions = { ...suggestions, [key]: { ...evaluation, fromDate: entry.date } };
+        setSuggestions(nextSuggestions); saveKey('suggestions', nextSuggestions);
+      }
+    }
+
+    setHistoryLoaded(false);
+    setShowIndependentForm(false);
+    setIndependentDraft(emptyIndependentDraft());
   }
   function removeLastSet(exId) {
     updateDayLog(log => {
@@ -1590,7 +1834,7 @@ export default function HybridAthleteApp() {
     const oneRMs = includesStrength ? buildOneRMs() : { squat: null, bench: null, deadlift: null, ohp: null };
     const bestRace = includesRunning ? bestRaceEstimate(form.recentRaces) : null;
     const vdot = bestRace ? computeVDOT(DIST_MILES[bestRace.distance], parseMinutesInput(bestRace.minutes)) : null;
-    const p = { ...form, oneRMs, vdot, learnedOneRMs: {} };
+    const p = { ...form, oneRMs, vdot, learnedOneRMs: {}, customExercises: [] };
     const lt = includesStrength ? buildLiftTemplate(p, oneRMs) : [];
     const rt = includesRunning ? buildRunTemplate(p) : [];
     const conf = detectConflicts(lt, form.injuries);
@@ -1601,7 +1845,7 @@ export default function HybridAthleteApp() {
 
   function resolveConflict(conflict, action) {
     let lt = pendingLiftTemplate;
-    if (action === 'swap') lt = swapExercise(lt, conflict.weekday, conflict.exerciseId, pendingProfile.equipment, pendingProfile.strengthGoal, pendingProfile.oneRMs, pendingProfile.learnedOneRMs);
+    if (action === 'swap') lt = swapExercise(lt, conflict.weekday, conflict.exerciseId, pendingProfile.equipment, pendingProfile.strengthGoal, pendingProfile.oneRMs, pendingProfile.learnedOneRMs, pendingProfile.customExercises || []);
     setPendingLiftTemplate(lt);
     setConflicts(conflicts.filter(c => c.id !== conflict.id));
   }
@@ -1681,7 +1925,9 @@ export default function HybridAthleteApp() {
     if (!log) return 0;
     const liftCals = todayEntry.lift ? estimateLiftCalories(todayEntry.lift, log, profile) : 0;
     const runCals = todayEntry.run ? estimateRunCalories(todayEntry.run, log, profile) : 0;
-    return Math.round(liftCals + runCals);
+    const independentLiftCals = estimateIndependentLiftCalories(log, profile);
+    const independentRunCals = estimateIndependentRunCalories(log, profile);
+    return Math.round(liftCals + runCals + independentLiftCals + independentRunCals);
   }, [profile, todayEntry, logsByDate, todayStr]);
   const macros = useMemo(() => {
     if (!profile) return null;
@@ -2554,6 +2800,109 @@ export default function HybridAthleteApp() {
                             <p className="text-xs font-bold text-stone-300 uppercase tracking-wide mb-1">{entry.type === 'active_recovery' ? 'Active Recovery' : 'Rest Day'}</p>
                             <p className="text-[11px] text-zinc-400">{dayMessage(entry.type === 'active_recovery' ? ACTIVE_RECOVERY_MESSAGES : REST_MESSAGES, entry.date)}</p>
                           </div>
+                        )}
+                        {(dayLog?.independentLift?.length > 0 || dayLog?.independentRun?.length > 0) && (
+                          <div className="bg-zinc-900 rounded-md p-2.5 border border-teal-600/40 space-y-2">
+                            <p className="text-xs font-bold text-teal-400 uppercase tracking-wide">Extra work logged</p>
+                            {dayLog.independentLift.map(exLog => (
+                              <div key={exLog.id} className="text-sm">
+                                <div className="flex items-center justify-between">
+                                  <span>{exLog.name}</span>
+                                  {exLog.rpe != null && <span className="text-[10px] text-zinc-500">RPE {exLog.rpe}</span>}
+                                </div>
+                                <p className="text-[11px] text-zinc-500 font-mono">{exLog.sets.map(s => `${s.weight}x${s.reps}`).join(', ')}</p>
+                              </div>
+                            ))}
+                            {dayLog.independentRun.map(r => (
+                              <div key={r.id} className="text-sm flex items-center justify-between">
+                                <span>{r.type} run</span>
+                                <span className="font-mono text-xs text-zinc-400">{r.distance}mi · {r.time}{r.effort != null ? ` · RPE ${r.effort}` : ''}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        {isLoggable && (
+                          showIndependentForm ? (
+                            <div className="bg-zinc-900 rounded-md p-3 border border-zinc-700 space-y-3">
+                              <p className="text-xs font-bold text-stone-200 uppercase tracking-wide">Log your own workout</p>
+                              {entry.lift && (
+                                <div className="flex gap-2">
+                                  <button onClick={() => setIndependentDraft(d => ({ ...d, liftOverride: 'keep' }))} className={`flex-1 py-1.5 rounded text-[11px] font-bold uppercase tracking-wide ${independentDraft.liftOverride === 'keep' ? 'bg-teal-500 text-zinc-900' : 'bg-zinc-800 text-zinc-400 border border-zinc-700'}`}>Keep prescribed + this</button>
+                                  <button onClick={() => setIndependentDraft(d => ({ ...d, liftOverride: 'replace' }))} className={`flex-1 py-1.5 rounded text-[11px] font-bold uppercase tracking-wide ${independentDraft.liftOverride === 'replace' ? 'bg-amber-500 text-zinc-900' : 'bg-zinc-800 text-zinc-400 border border-zinc-700'}`}>Replace prescribed</button>
+                                </div>
+                              )}
+                              <div className="space-y-3">
+                                {independentDraft.liftExercises.map((row, idx) => (
+                                  <div key={idx} className="bg-zinc-800 rounded-md p-2 space-y-2">
+                                    <div className="flex items-start gap-2">
+                                      <div className="flex-1">
+                                        <ExerciseCombobox row={row} onChange={next => updateIndependentExerciseRow(idx, next)} customExercises={profile.customExercises} defaultEquipment={profile.equipment} />
+                                      </div>
+                                      <button onClick={() => removeIndependentExerciseRow(idx)} className="text-zinc-500 mt-2"><X size={14} /></button>
+                                    </div>
+                                    {row.sets.map((s, si) => (
+                                      <div key={si} className="flex items-center gap-2">
+                                        <span className="text-[10px] w-10 font-mono text-zinc-500 shrink-0">Set {si + 1}</span>
+                                        <input placeholder="lb" value={s.weight} onChange={e => updateIndependentSet(idx, si, 'weight', e.target.value)} className="w-16 bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs" />
+                                        <input placeholder="reps" value={s.reps} onChange={e => updateIndependentSet(idx, si, 'reps', e.target.value)} className="w-14 bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs" />
+                                        {row.sets.length > 1 && <button onClick={() => removeIndependentSet(idx, si)} className="text-zinc-600"><X size={13} /></button>}
+                                      </div>
+                                    ))}
+                                    <button onClick={() => addIndependentSet(idx)} className="text-[11px] text-zinc-500 flex items-center gap-1"><Plus size={11} />Add set</button>
+                                    <div>
+                                      <p className="text-[10px] text-zinc-500 mb-1">RPE</p>
+                                      <div className="flex flex-wrap gap-1">
+                                        {Array.from({ length: 10 }, (_, i) => i + 1).map(n => (
+                                          <button key={n} onClick={() => updateIndependentExerciseRow(idx, { ...row, rpe: n })} className={`w-6 h-6 rounded text-[11px] font-mono ${row.rpe === n ? 'bg-amber-500 text-zinc-900' : 'bg-zinc-900 text-zinc-400'}`}>{n}</button>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                              <button onClick={addIndependentExerciseRow} className="w-full py-1.5 rounded border border-zinc-700 text-xs font-bold uppercase tracking-wide flex items-center justify-center gap-1"><Plus size={12} />Add exercise</button>
+
+                              <div className="pt-2 border-t border-zinc-700 space-y-2">
+                                <label className="flex items-center gap-2 text-xs text-zinc-300">
+                                  <input type="checkbox" checked={independentDraft.logRun} onChange={e => setIndependentDraft(d => ({ ...d, logRun: e.target.checked }))} />
+                                  Also log a run
+                                </label>
+                                {independentDraft.logRun && (
+                                  <div className="space-y-2">
+                                    {entry.run && (
+                                      <div className="flex gap-2">
+                                        <button onClick={() => setIndependentDraft(d => ({ ...d, runOverride: 'keep' }))} className={`flex-1 py-1.5 rounded text-[11px] font-bold uppercase tracking-wide ${independentDraft.runOverride === 'keep' ? 'bg-teal-500 text-zinc-900' : 'bg-zinc-800 text-zinc-400 border border-zinc-700'}`}>Keep prescribed + this</button>
+                                        <button onClick={() => setIndependentDraft(d => ({ ...d, runOverride: 'replace' }))} className={`flex-1 py-1.5 rounded text-[11px] font-bold uppercase tracking-wide ${independentDraft.runOverride === 'replace' ? 'bg-amber-500 text-zinc-900' : 'bg-zinc-800 text-zinc-400 border border-zinc-700'}`}>Replace prescribed</button>
+                                      </div>
+                                    )}
+                                    <select value={independentDraft.runType} onChange={e => setIndependentDraft(d => ({ ...d, runType: e.target.value }))} className="w-full bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs">
+                                      <option value="Easy">Easy</option><option value="Long">Long</option><option value="Tempo">Tempo</option><option value="Quality">Quality</option><option value="Race">Race</option>
+                                    </select>
+                                    <div className="grid grid-cols-2 gap-2">
+                                      <input placeholder="miles" value={independentDraft.runDistance} onChange={e => setIndependentDraft(d => ({ ...d, runDistance: e.target.value }))} className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs" />
+                                      <input placeholder="time (mm:ss)" value={independentDraft.runTime} onChange={e => setIndependentDraft(d => ({ ...d, runTime: e.target.value }))} className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs" />
+                                    </div>
+                                    <input placeholder="notes (optional)" value={independentDraft.runNotes} onChange={e => setIndependentDraft(d => ({ ...d, runNotes: e.target.value }))} className="w-full bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs" />
+                                    <div>
+                                      <p className="text-[10px] text-zinc-500 mb-1">Effort (RPE)</p>
+                                      <div className="flex flex-wrap gap-1">
+                                        {Array.from({ length: 10 }, (_, i) => i + 1).map(n => (
+                                          <button key={n} onClick={() => setIndependentDraft(d => ({ ...d, runEffort: n }))} className={`w-6 h-6 rounded text-[11px] font-mono ${independentDraft.runEffort === n ? 'bg-amber-500 text-zinc-900' : 'bg-zinc-900 text-zinc-400'}`}>{n}</button>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+
+                              <div className="flex gap-2 pt-1">
+                                <button onClick={() => { setShowIndependentForm(false); setIndependentDraft(emptyIndependentDraft()); }} className="flex-1 py-2 rounded bg-zinc-800 border border-zinc-700 text-xs font-bold uppercase tracking-wide">Cancel</button>
+                                <button onClick={() => saveIndependentWorkout(entry)} className="flex-1 py-2 rounded bg-teal-500 text-zinc-900 text-xs font-bold uppercase tracking-wide">Save workout</button>
+                              </div>
+                            </div>
+                          ) : (
+                            <button onClick={() => setShowIndependentForm(true)} className="w-full py-2 rounded border border-dashed border-zinc-600 text-xs font-bold uppercase tracking-wide text-zinc-400">+ Log your own workout</button>
+                          )
                         )}
                         {isLoggable && saveError && <p className="text-[11px] text-orange-400">Couldn't save just now — check your connection and try again.</p>}
                       </div>
