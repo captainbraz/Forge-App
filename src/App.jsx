@@ -415,9 +415,14 @@ function minRepsFromLabel(repsLabel) {
 }
 function evaluateExerciseLog(exercise, log) {
   if (log.rpe == null) return null;
-  const loggedWeights = log.sets.map(s => Number(s.weight)).filter(n => !isNaN(n) && n > 0);
-  if (loggedWeights.length === 0) return null;
-  const avgWeight = loggedWeights.reduce((a, b) => a + b, 0) / loggedWeights.length;
+  const warmupOffset = exercise.needsWarmup ? 1 : 0;
+  const workingWeights = [];
+  for (let i = warmupOffset; i < warmupOffset + exercise.sets; i++) {
+    const s = log.sets[i];
+    if (s && s.done) { const w = Number(s.weight); if (!isNaN(w) && w > 0) workingWeights.push(w); }
+  }
+  if (workingWeights.length === 0) return null;
+  const avgWeight = workingWeights.reduce((a, b) => a + b, 0) / workingWeights.length;
   const fallbackMinReps = minRepsFromLabel(exercise.reps);
   const repsShortfall = log.sets.some((s, i) => {
     if (!s.done || s.reps === '') return false;
