@@ -1071,11 +1071,19 @@ function computePaces(profile) {
 function detectConflicts(liftTemplate, injuries) {
   const active = injuries.filter(inj => inj.status === 'current' || inj.status === 'recurring');
   if (active.length === 0) return [];
+  const seen = new Set();
   const conflicts = [];
   liftTemplate.forEach(day => {
     day.exercises.forEach(ex => {
       active.forEach(inj => {
-        if (ex.areas.includes(inj.area)) conflicts.push({ id: `${day.weekday}-${ex.id}`, weekday: day.weekday, dayType: day.dayType, exerciseId: ex.id, exerciseName: ex.name, pattern: ex.pattern, area: inj.area, status: inj.status });
+        if (!ex.areas.includes(inj.area)) return;
+        // the same weekday+exercise slot recurs once per week across the block (same id, since the
+        // exercise id doesn't encode the week) — collapse those into a single resolvable conflict,
+        // matching how swapExercise/resolveConflict apply a resolution to every week at once
+        const id = `${day.weekday}-${ex.id}`;
+        if (seen.has(id)) return;
+        seen.add(id);
+        conflicts.push({ id, weekday: day.weekday, dayType: day.dayType, exerciseId: ex.id, exerciseName: ex.name, pattern: ex.pattern, area: inj.area, status: inj.status });
       });
     });
   });
