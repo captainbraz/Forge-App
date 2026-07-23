@@ -187,8 +187,17 @@ function prescriptionFor(name, goal) {
   if (!spec) return null;
   const [repLow, repHigh] = pickRepRange(spec.repOptions, goal);
   const sets = pickSetsCount(spec.setsRange, goal);
-  const style = (spec.style === 'either' && goal === 'strength') ? 'reverse_pyramid' : 'straight';
+  let style = 'straight';
+  if (spec.style === 'either') {
+    if (goal === 'strength') style = 'reverse_pyramid'; // heaviest set first, back off from there — best for building a max
+    else if (goal === 'hypertrophy') style = 'pyramid'; // ramp up to a top set — adds a intensity peak without going heavy-only
+  }
   return { sets, repLow, repHigh, style, dropSet: spec.dropSet };
+}
+const SET_SCHEME_LABELS = { straight: 'Straight sets', reverse_pyramid: 'Reverse pyramid', pyramid: 'Pyramid' };
+function nextSetScheme(current) {
+  const order = ['straight', 'reverse_pyramid', 'pyramid'];
+  return order[(order.indexOf(current) + 1) % order.length];
 }
 function repsDisplay(repLow, repHigh) { return repLow === repHigh ? `${repLow}` : `${repLow}-${repHigh}`; }
 const patternMuscleGroup = {
@@ -215,6 +224,11 @@ function buildSetPlan({ sets, repLow, repHigh, style, dropSet, weight, needsWarm
     if (style === 'reverse_pyramid') {
       const reps = sets > 1 ? Math.round(repLow + (i * (repHigh - repLow)) / (sets - 1)) : repLow;
       const targetWeight = weight ? Math.round((weight * (1 - 0.1 * i)) / 5) * 5 : null;
+      plan.push({ targetWeight, targetReps: reps, isDrop: false });
+    } else if (style === 'pyramid') {
+      // ramps up to the top (heaviest, lowest-rep) set on the last working set
+      const reps = sets > 1 ? Math.round(repHigh - (i * (repHigh - repLow)) / (sets - 1)) : repLow;
+      const targetWeight = weight ? Math.round((weight * (0.8 + (sets > 1 ? 0.2 * (i / (sets - 1)) : 0.2))) / 5) * 5 : null;
       plan.push({ targetWeight, targetReps: reps, isDrop: false });
     } else {
       plan.push({ targetWeight: weight || null, targetReps: repLow, isDrop: false });
@@ -642,6 +656,15 @@ function buildRunLogSkeleton(runEntry) {
   }
   return { distance: '', time: '', effort: 5, notes: '', avgHR: null, maxHR: null };
 }
+function autoFormatTimeDigits(raw, maxDigits) {
+  if (String(raw).includes('.')) return raw; // preserve decimal-minutes shorthand where it's supported
+  const digits = String(raw).replace(/\D/g, '').slice(0, maxDigits);
+  if (digits.length <= 2) return digits;
+  if (digits.length <= 4) return digits.slice(0, digits.length - 2) + ':' + digits.slice(-2);
+  return digits.slice(0, digits.length - 4) + ':' + digits.slice(-4, -2) + ':' + digits.slice(-2);
+}
+function autoFormatMinSec(raw) { return autoFormatTimeDigits(raw, 4); }
+function autoFormatRaceTime(raw) { return autoFormatTimeDigits(raw, 6); }
 function timeStrToSeconds(str) {
   const parts = String(str).split(':').map(Number);
   if (parts.length !== 2 || isNaN(parts[0]) || isNaN(parts[1])) return null;
@@ -688,6 +711,27 @@ function runLogTotals(runEntry, log, profile) {
   return { distance: +totalDistance.toFixed(2), time: secondsToTimeStr(totalSeconds) };
 }
 const LAP_TYPE_LABELS = { warmup: 'Warm-up', active: 'Active', recovery: 'Recovery', cooldown: 'Cool-down', rest: 'Rest' };
+const RPE_DESCRIPTIONS = {
+  1: 'No exertion at all — standing still.',
+  2: 'Very light — barely feels like exercise.',
+  3: 'Light — easy, could keep going for a long time.',
+  4: 'Light-moderate — comfortable, breathing up slightly.',
+  5: 'Moderate — working, but could easily do many more reps.',
+  6: 'Somewhat hard — 5-6 reps left in the tank if pushed to failure.',
+  7: 'Hard — about 3 reps left in the tank, effort is clearly building.',
+  8: 'Very hard — about 2 reps left in the tank, last rep takes real focus.',
+  9: 'Near maximal — 1 rep left in the tank, that rep is a grind.',
+  10: 'Maximal — no reps left, could not complete another rep with good form.'
+};
+const CHANGELOG = [
+  { version: '1.6', notes: ['Real descriptions for each RPE value, shown right after you rate one', 'Time fields (race times, run times, laps) auto-format to mm:ss / hh:mm:ss as you type', 'Changelog and feedback/ideas screens (this one, and the one right after it)', 'Mark sets as warm-up or drop set when logging your own workout', 'Set scheme (straight / reverse pyramid / pyramid) is now visible and adjustable per exercise', 'Basic superset pairing for your own logged workouts'] },
+  { version: '1.5', notes: ['Fixed a crash editing your profile if it was missing a birthday', 'Fixed splits repeating the same day type forever instead of rotating across weeks', 'Weight/rep suggestions now actually change what a future workout prescribes, not just the preview text', 'Suggestion reasons now state exactly what you did last time before the recommendation', 'Refreshing the page no longer bounces you back to the dashboard', 'You can now edit or delete a previously logged independent workout'] },
+  { version: '1.4', notes: ['Weight-suggestion fix: suggests more reps instead of a no-op weight bump when the math rounds down', 'Edit your profile (name, age, weight, height, activity, nutrition goal) without restarting', 'Assign specific split days to specific weekdays', 'Edit training setup anytime — only affects future, not-yet-logged days', 'Start a new plan while keeping or reseeding your lift maxes', 'Block history and automatic rollover into the next 4-week block'] },
+  { version: '1.3', notes: ['Guided, one-at-a-time RPE entry when completing a workout', 'Completion now reacts automatically to edits after the first time you complete a workout'] },
+  { version: '1.2', notes: ['Split "log your own workout" into separate lift and run forms', 'Run logging: type tagging and full lap-by-lap detail (warm-up/active/recovery/cool-down/rest)'] },
+  { version: '1.1', notes: ['Custom exercises that fold into the normal rotation', 'Log an independent lift or run workout alongside or instead of what\'s prescribed', 'New splits: Body Part Split, Arnold Split, PHUL'] },
+  { version: '1.0', notes: ['Initial release — guided setup, auto-generated 4-week training blocks, workout logging, run tracking, and nutrition targets'] }
+];
 function emptyLap() { return { type: 'active', distance: '', time: '' }; }
 function lapTotals(laps) {
   let totalDistance = 0, totalSeconds = 0;
@@ -1341,7 +1385,9 @@ function DualWheelPicker({ leftLabel, rightLabel, leftOptions, rightOptions, lef
     </div>
   );
 }
-function emptyIndependentExerciseRow() { return { query: '', name: null, pattern: null, equipment: null, isNew: false, sets: [{ weight: '', reps: '' }], rpe: null }; }
+function emptyIndependentExerciseRow() { return { query: '', name: null, pattern: null, equipment: null, isNew: false, sets: [{ weight: '', reps: '', type: 'working' }], rpe: null, supersetGroup: null }; }
+const SET_TYPE_LABELS = { working: 'Working', warmup: 'Warm-up', drop: 'Drop' };
+const SUPERSET_COLORS = { A: '#f59e0b', B: '#2dd4bf', C: '#a78bfa', D: '#f472b6' };
 function emptyIndependentLiftDraft() { return { liftExercises: [], liftOverride: 'keep' }; }
 function emptyIndependentRunDraft() { return { runType: 'Easy', runDistance: '', runTime: '', runEffort: null, runNotes: '', runOverride: 'keep', laps: [] }; }
 function ExerciseCombobox({ row, onChange, customExercises, defaultEquipment }) {
@@ -1417,6 +1463,11 @@ export default function HybridAthleteApp() {
   const [showSplash, setShowSplash] = useState(true);
   const [showSettingsMenu, setShowSettingsMenu] = useState(false);
   const [showInjuryManager, setShowInjuryManager] = useState(false);
+  const [showRpeGuide, setShowRpeGuide] = useState(false);
+  const [showChangelog, setShowChangelog] = useState(false);
+  const [showFeedback, setShowFeedback] = useState(false);
+  const [feedbackDraft, setFeedbackDraft] = useState('');
+  const [feedbackList, setFeedbackList] = useState([]);
   const [confirmRestart, setConfirmRestart] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
@@ -1467,6 +1518,8 @@ export default function HybridAthleteApp() {
       const sugg = await loadKey('suggestions');
       const history = await loadKey('blockHistory');
       if (history) setBlockHistory(history);
+      const feedback = await loadKey('feedback');
+      if (feedback) setFeedbackList(feedback);
       const ui = await loadKey('uiState');
       if (ui) {
         if (ui.tab) setTab(ui.tab);
@@ -1586,8 +1639,8 @@ export default function HybridAthleteApp() {
   async function exportAllData() {
     setExporting(true);
     try {
-      const [profileData, calendarData, liftTemplateData, suggestionsData] = await Promise.all([
-        loadKey('profile'), loadKey('calendar'), loadKey('liftTemplate'), loadKey('suggestions')
+      const [profileData, calendarData, liftTemplateData, suggestionsData, blockHistoryData, feedbackData] = await Promise.all([
+        loadKey('profile'), loadKey('calendar'), loadKey('liftTemplate'), loadKey('suggestions'), loadKey('blockHistory'), loadKey('feedback')
       ]);
       const logKeys = await listKeys('log:');
       const foodKeys = await listKeys('food:');
@@ -1595,7 +1648,10 @@ export default function HybridAthleteApp() {
       for (const key of logKeys) { const d = await loadKey(key); if (d) logs[key] = d; }
       const food = {};
       for (const key of foodKeys) { const d = await loadKey(key); if (d) food[key] = d; }
-      const bundle = { exportedAt: new Date().toISOString(), profile: profileData, calendar: calendarData, liftTemplate: liftTemplateData, suggestions: suggestionsData, logs, food };
+      const bundle = {
+        exportedAt: new Date().toISOString(), profile: profileData, calendar: calendarData, liftTemplate: liftTemplateData,
+        suggestions: suggestionsData, blockHistory: blockHistoryData, feedback: feedbackData, logs, food
+      };
       const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -1764,6 +1820,16 @@ export default function HybridAthleteApp() {
     setCalendar(nextCalendar); saveKey('calendar', nextCalendar);
     return nextProfile;
   }
+  function saveFeedbackEntry() {
+    if (!feedbackDraft.trim()) return;
+    const next = [...feedbackList, { id: `fb-${Date.now()}`, text: feedbackDraft.trim(), date: dateKey(new Date()) }];
+    setFeedbackList(next); saveKey('feedback', next);
+    setFeedbackDraft('');
+  }
+  function deleteFeedbackEntry(id) {
+    const next = feedbackList.filter(f => f.id !== id);
+    setFeedbackList(next); saveKey('feedback', next);
+  }
   function startEditingProfile() {
     setProfileDraft({
       name: profile.name || '', sex: profile.sex || 'male',
@@ -1819,6 +1885,23 @@ export default function HybridAthleteApp() {
       }
     }
   }
+  function changeSetScheme(entry, ex) {
+    const style = nextSetScheme(ex.style);
+    const setPlan = buildSetPlan({ sets: ex.sets, repLow: ex.repLow, repHigh: ex.repHigh, style, dropSet: ex.dropSet, weight: ex.weight, needsWarmup: ex.needsWarmup });
+    const nextCalendar = calendar.map(week => ({
+      ...week,
+      days: Object.fromEntries(Object.entries(week.days).map(([wd, e]) => {
+        if (e.date === entry.date && e.lift) {
+          const exercises = e.lift.exercises.map(x => x.id === ex.id ? { ...x, style, setPlan } : x);
+          return [wd, { ...e, lift: { ...e.lift, exercises } }];
+        }
+        return [wd, e];
+      }))
+    }));
+    setCalendar(nextCalendar); saveKey('calendar', nextCalendar);
+    const newSets = setPlan.map(p => ({ weight: p.targetWeight != null ? String(p.targetWeight) : '', reps: p.targetReps != null ? String(p.targetReps) : '', done: false }));
+    updateDayLog(log => ({ ...log, lift: { ...log.lift, [ex.id]: { ...log.lift[ex.id], sets: newSets, rpe: null } } }));
+  }
   function swapToday(exId, ex, currentName) {
     updateDayLog(log => {
       const pool = poolFor(ex.pattern, profile.equipment, profile.customExercises || []);
@@ -1860,7 +1943,7 @@ export default function HybridAthleteApp() {
     }));
   }
   function addIndependentSet(idx) {
-    setIndependentLiftDraft(d => ({ ...d, liftExercises: d.liftExercises.map((r, i) => i === idx ? { ...r, sets: [...r.sets, { weight: '', reps: '' }] } : r) }));
+    setIndependentLiftDraft(d => ({ ...d, liftExercises: d.liftExercises.map((r, i) => i === idx ? { ...r, sets: [...r.sets, { weight: '', reps: '', type: 'working' }] } : r) }));
   }
   function removeIndependentSet(idx, si) {
     setIndependentLiftDraft(d => ({ ...d, liftExercises: d.liftExercises.map((r, i) => i === idx ? { ...r, sets: r.sets.filter((_, j) => j !== si) } : r) }));
@@ -1879,8 +1962,8 @@ export default function HybridAthleteApp() {
         }
         return {
           id: `indep-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-          name: row.name, pattern: row.pattern,
-          sets: row.sets.filter(s => s.weight && s.reps).map(s => ({ weight: String(s.weight), reps: String(s.reps), done: true })),
+          name: row.name, pattern: row.pattern, supersetGroup: row.supersetGroup || null,
+          sets: row.sets.filter(s => s.weight && s.reps).map(s => ({ weight: String(s.weight), reps: String(s.reps), done: true, type: s.type || 'working' })),
           rpe: row.rpe
         };
       });
@@ -1908,7 +1991,8 @@ export default function HybridAthleteApp() {
     const nextLearned = { ...(nextProfile.learnedOneRMs || {}) };
     let nextOneRMs = nextProfile.oneRMs;
     independentLift.forEach(exLog => {
-      const learned = bestOneRMFromSets(exLog.sets);
+      const workingSets = exLog.sets.filter(s => (s.type || 'working') === 'working');
+      const learned = bestOneRMFromSets(workingSets);
       if (learned) {
         learnedChanged = true;
         nextLearned[exLog.name] = learned;
@@ -1988,7 +2072,8 @@ export default function HybridAthleteApp() {
       ...d,
       liftExercises: [...d.liftExercises, {
         query: '', name: exLog.name, pattern: exLog.pattern, equipment: custom?.equipment || profile.equipment, isNew: false,
-        sets: exLog.sets.map(s => ({ weight: s.weight, reps: s.reps })), rpe: exLog.rpe
+        sets: exLog.sets.map(s => ({ weight: s.weight, reps: s.reps, type: s.type || 'working' })), rpe: exLog.rpe,
+        supersetGroup: exLog.supersetGroup || null
       }]
     }));
     deleteIndependentLift(date, logId);
@@ -2572,7 +2657,7 @@ export default function HybridAthleteApp() {
                           </select>
                           {form.recentRaces.length > 1 && <button onClick={() => removeRace(i)} className="text-zinc-500"><X size={16} /></button>}
                         </div>
-                        <input placeholder="time: 24:30 or 24.5" value={race.minutes} onChange={e => updateRace(i, 'minutes', e.target.value)} className={inputCls} />
+                        <input placeholder="time: 24:30 or 24.5" value={race.minutes} onChange={e => updateRace(i, 'minutes', autoFormatRaceTime(e.target.value))} className={inputCls} />
                         {race.minutes && (
                           <div className="mt-2">
                             <p className="text-[11px] text-zinc-500 mb-1">When? {durationLabel(race.since.month, race.since.year) && <span className="text-amber-500">· {durationLabel(race.since.month, race.since.year)} ago</span>}</p>
@@ -2978,6 +3063,86 @@ export default function HybridAthleteApp() {
     );
   }
 
+  if (showRpeGuide) {
+    return (
+      <div className="min-h-screen bg-zinc-900 text-stone-100 p-4">
+        <div className="max-w-sm mx-auto">
+          <div className="flex items-center justify-between mb-4">
+            <h1 className="text-lg font-black uppercase tracking-widest">RPE guide</h1>
+            <button onClick={() => setShowRpeGuide(false)} className="text-sm font-bold text-teal-400 uppercase tracking-wide">Done</button>
+          </div>
+          <p className="text-xs text-zinc-500 mb-3">RPE (Rate of Perceived Exertion) is how hard a set felt, on a 1-10 scale — not the weight, the effort.</p>
+          <div className="space-y-2">
+            {Array.from({ length: 10 }, (_, i) => 10 - i).map(n => (
+              <Card key={n}>
+                <div className="flex items-start gap-3">
+                  <span className="text-lg font-bold font-mono text-amber-500 w-6 shrink-0">{n}</span>
+                  <p className="text-sm text-zinc-300">{RPE_DESCRIPTIONS[n]}</p>
+                </div>
+              </Card>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (showChangelog) {
+    return (
+      <div className="min-h-screen bg-zinc-900 text-stone-100 p-4">
+        <div className="max-w-sm mx-auto">
+          <div className="flex items-center justify-between mb-4">
+            <h1 className="text-lg font-black uppercase tracking-widest">Changelog</h1>
+            <button onClick={() => setShowChangelog(false)} className="text-sm font-bold text-teal-400 uppercase tracking-wide">Done</button>
+          </div>
+          <div className="space-y-3">
+            {CHANGELOG.map(entry => (
+              <Card key={entry.version}>
+                <SectionHeader accent="teal">v{entry.version}</SectionHeader>
+                <ul className="mt-2 space-y-1 list-disc list-inside">
+                  {entry.notes.map((note, i) => <li key={i} className="text-xs text-zinc-300">{note}</li>)}
+                </ul>
+              </Card>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (showFeedback) {
+    return (
+      <div className="min-h-screen bg-zinc-900 text-stone-100 p-4">
+        <div className="max-w-sm mx-auto">
+          <div className="flex items-center justify-between mb-4">
+            <h1 className="text-lg font-black uppercase tracking-widest">Feedback & ideas</h1>
+            <button onClick={() => setShowFeedback(false)} className="text-sm font-bold text-teal-400 uppercase tracking-wide">Done</button>
+          </div>
+          <p className="text-xs text-zinc-500 mb-3">A running list of bugs, ideas, and things to revisit — kept on this device alongside the rest of your data (included in "Export my data").</p>
+          <div className="space-y-2 mb-4">
+            <textarea value={feedbackDraft} onChange={e => setFeedbackDraft(e.target.value)} placeholder="Found something off, or have an idea?" rows={3} className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-2 text-sm text-stone-100" />
+            <button onClick={saveFeedbackEntry} className="w-full py-2 rounded bg-teal-500 text-zinc-900 text-sm font-bold uppercase tracking-wide">Add</button>
+          </div>
+          {feedbackList.length === 0 ? (
+            <p className="text-sm text-zinc-500">Nothing logged yet.</p>
+          ) : (
+            <div className="space-y-2">
+              {[...feedbackList].reverse().map(f => (
+                <Card key={f.id}>
+                  <div className="flex items-start justify-between gap-2">
+                    <p className="text-sm text-zinc-200 flex-1">{f.text}</p>
+                    <button onClick={() => deleteFeedbackEntry(f.id)} className="text-zinc-600 shrink-0"><X size={14} /></button>
+                  </div>
+                  <p className="text-[10px] text-zinc-600 mt-1">{f.date}</p>
+                </Card>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   // ---------- main app ----------
   const week = calendar[Math.min(weekIndex, calendar.length - 1)];
   return (
@@ -2997,8 +3162,11 @@ export default function HybridAthleteApp() {
               <div className="absolute right-0 top-8 z-20 w-48 bg-zinc-800 border border-zinc-700 rounded-lg shadow-xl overflow-hidden">
                 <button onClick={() => { setShowSettingsMenu(false); setShowInjuryManager(true); }} className="w-full text-left px-3 py-2.5 text-sm hover:bg-zinc-700">Manage injuries</button>
                 <button onClick={() => { setShowSettingsMenu(false); startEditingTrainingSetup(); }} className="w-full text-left px-3 py-2.5 text-sm hover:bg-zinc-700 border-t border-zinc-700">Edit training setup</button>
+                <button onClick={() => { setShowSettingsMenu(false); setShowRpeGuide(true); }} className="w-full text-left px-3 py-2.5 text-sm hover:bg-zinc-700 border-t border-zinc-700">RPE guide</button>
                 <button onClick={() => { setShowSettingsMenu(false); exportAllData(); }} disabled={exporting} className="w-full text-left px-3 py-2.5 text-sm hover:bg-zinc-700 border-t border-zinc-700">{exporting ? 'Exporting...' : 'Export my data'}</button>
                 <button onClick={() => { setShowSettingsMenu(false); setShowBlockHistory(true); }} className="w-full text-left px-3 py-2.5 text-sm hover:bg-zinc-700 border-t border-zinc-700">Past blocks{blockHistory.length > 0 ? ` (${blockHistory.length})` : ''}</button>
+                <button onClick={() => { setShowSettingsMenu(false); setShowChangelog(true); }} className="w-full text-left px-3 py-2.5 text-sm hover:bg-zinc-700 border-t border-zinc-700">Changelog</button>
+                <button onClick={() => { setShowSettingsMenu(false); setShowFeedback(true); }} className="w-full text-left px-3 py-2.5 text-sm hover:bg-zinc-700 border-t border-zinc-700">Feedback & ideas</button>
                 <button onClick={() => { setShowSettingsMenu(false); setShowStartNewPlan(true); }} className="w-full text-left px-3 py-2.5 text-sm text-amber-400 hover:bg-zinc-700 border-t border-zinc-700">Start new plan</button>
                 <button onClick={() => { setShowSettingsMenu(false); setConfirmRestart(true); }} className="w-full text-left px-3 py-2.5 text-sm text-orange-400 hover:bg-zinc-700 border-t border-zinc-700">Restart full setup</button>
               </div>
@@ -3089,14 +3257,14 @@ export default function HybridAthleteApp() {
                       <div className="bg-zinc-900 rounded-md p-2.5 border border-teal-600/40 space-y-2">
                         <p className="text-xs font-bold text-teal-400 uppercase tracking-wide">Extra lift work logged</p>
                         {dayLog.independentLift.map(exLog => (
-                          <div key={exLog.id} className="text-sm">
+                          <div key={exLog.id} className="text-sm" style={exLog.supersetGroup ? { borderLeft: `3px solid ${SUPERSET_COLORS[exLog.supersetGroup]}`, paddingLeft: 6 } : undefined}>
                             <div className="flex items-center justify-between gap-2">
-                              <span className="flex-1">{exLog.name}</span>
+                              <span className="flex-1">{exLog.supersetGroup ? `[${exLog.supersetGroup}] ` : ''}{exLog.name}</span>
                               {exLog.rpe != null && <span className="text-[10px] text-zinc-500 shrink-0">RPE {exLog.rpe}</span>}
                               <button onClick={() => editIndependentLift(entry.date, exLog.id)} className="text-[10px] text-teal-400 font-bold uppercase shrink-0">Edit</button>
                               <button onClick={() => deleteIndependentLift(entry.date, exLog.id)} className="text-zinc-600 shrink-0"><X size={12} /></button>
                             </div>
-                            <p className="text-[11px] text-zinc-500 font-mono">{exLog.sets.map(s => `${s.weight}x${s.reps}`).join(', ')}</p>
+                            <p className="text-[11px] text-zinc-500 font-mono">{exLog.sets.map(s => `${s.type && s.type !== 'working' ? SET_TYPE_LABELS[s.type] + ' ' : ''}${s.weight}x${s.reps}`).join(', ')}</p>
                           </div>
                         ))}
                       </div>
@@ -3113,16 +3281,25 @@ export default function HybridAthleteApp() {
                           )}
                           <div className="space-y-3">
                             {independentLiftDraft.liftExercises.map((row, idx) => (
-                              <div key={idx} className="bg-zinc-800 rounded-md p-2 space-y-2">
+                              <div key={idx} className="bg-zinc-800 rounded-md p-2 space-y-2" style={row.supersetGroup ? { borderLeft: `3px solid ${SUPERSET_COLORS[row.supersetGroup]}` } : undefined}>
                                 <div className="flex items-start gap-2">
                                   <div className="flex-1">
                                     <ExerciseCombobox row={row} onChange={next => updateIndependentExerciseRow(idx, next)} customExercises={profile.customExercises} defaultEquipment={profile.equipment} />
                                   </div>
                                   <button onClick={() => removeIndependentExerciseRow(idx)} className="text-zinc-500 mt-2"><X size={14} /></button>
                                 </div>
+                                <div className="flex items-center gap-1.5">
+                                  <span className="text-[10px] text-zinc-500">Superset</span>
+                                  <select value={row.supersetGroup || ''} onChange={e => updateIndependentExerciseRow(idx, { ...row, supersetGroup: e.target.value || null })} className="bg-zinc-900 border border-zinc-700 rounded px-1.5 py-1 text-[10px]">
+                                    <option value="">None</option>
+                                    {['A', 'B', 'C', 'D'].map(g => <option key={g} value={g}>Group {g}</option>)}
+                                  </select>
+                                </div>
                                 {row.sets.map((s, si) => (
                                   <div key={si} className="flex items-center gap-2">
-                                    <span className="text-[10px] w-10 font-mono text-zinc-500 shrink-0">Set {si + 1}</span>
+                                    <select value={s.type || 'working'} onChange={e => updateIndependentSet(idx, si, 'type', e.target.value)} className="w-[74px] shrink-0 bg-zinc-900 border border-zinc-700 rounded px-1 py-1 text-[10px]">
+                                      {Object.entries(SET_TYPE_LABELS).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
+                                    </select>
                                     <input placeholder="lb" value={s.weight} onChange={e => updateIndependentSet(idx, si, 'weight', e.target.value)} className="w-16 bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs" />
                                     <input placeholder="reps" value={s.reps} onChange={e => updateIndependentSet(idx, si, 'reps', e.target.value)} className="w-14 bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs" />
                                     {row.sets.length > 1 && <button onClick={() => removeIndependentSet(idx, si)} className="text-zinc-600"><X size={13} /></button>}
@@ -3136,6 +3313,7 @@ export default function HybridAthleteApp() {
                                       <button key={n} onClick={() => updateIndependentExerciseRow(idx, { ...row, rpe: n })} className={`w-6 h-6 rounded text-[11px] font-mono ${row.rpe === n ? 'bg-amber-500 text-zinc-900' : 'bg-zinc-900 text-zinc-400'}`}>{n}</button>
                                     ))}
                                   </div>
+                                  {row.rpe != null && <p className="text-[10px] text-zinc-500 mt-1">{RPE_DESCRIPTIONS[row.rpe]}</p>}
                                 </div>
                               </div>
                             ))}
@@ -3195,7 +3373,7 @@ export default function HybridAthleteApp() {
                           {independentRunDraft.laps.length === 0 ? (
                             <div className="grid grid-cols-2 gap-2">
                               <input placeholder="miles" value={independentRunDraft.runDistance} onChange={e => setIndependentRunDraft(d => ({ ...d, runDistance: e.target.value }))} className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs" />
-                              <input placeholder="time (mm:ss)" value={independentRunDraft.runTime} onChange={e => setIndependentRunDraft(d => ({ ...d, runTime: e.target.value }))} className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs" />
+                              <input placeholder="time (mm:ss)" value={independentRunDraft.runTime} onChange={e => setIndependentRunDraft(d => ({ ...d, runTime: autoFormatMinSec(e.target.value) }))} className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs" />
                             </div>
                           ) : (
                             <p className="text-[11px] text-teal-400">Total: {lapTotals(independentRunDraft.laps).distance || 0}mi · {lapTotals(independentRunDraft.laps).time || '0:00'} (from laps below)</p>
@@ -3208,7 +3386,7 @@ export default function HybridAthleteApp() {
                                   {Object.entries(LAP_TYPE_LABELS).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
                                 </select>
                                 <input placeholder="mi" value={lap.distance} onChange={e => updateIndependentLap(li, 'distance', e.target.value)} className="w-14 bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs" />
-                                <input placeholder="mm:ss" value={lap.time} onChange={e => updateIndependentLap(li, 'time', e.target.value)} className="w-16 bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs" />
+                                <input placeholder="mm:ss" value={lap.time} onChange={e => updateIndependentLap(li, 'time', autoFormatMinSec(e.target.value))} className="w-16 bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs" />
                                 <button onClick={() => removeIndependentLap(li)} className="text-zinc-600 shrink-0"><X size={13} /></button>
                               </div>
                             ))}
@@ -3222,6 +3400,7 @@ export default function HybridAthleteApp() {
                                 <button key={n} onClick={() => setIndependentRunDraft(d => ({ ...d, runEffort: n }))} className={`w-6 h-6 rounded text-[11px] font-mono ${independentRunDraft.runEffort === n ? 'bg-amber-500 text-zinc-900' : 'bg-zinc-900 text-zinc-400'}`}>{n}</button>
                               ))}
                             </div>
+                            {independentRunDraft.runEffort != null && <p className="text-[10px] text-zinc-500 mt-1">{RPE_DESCRIPTIONS[independentRunDraft.runEffort]}</p>}
                           </div>
                           <div className="flex gap-2 pt-1">
                             <button onClick={() => { setShowIndependentRunForm(false); setIndependentRunDraft(emptyIndependentRunDraft()); }} className="flex-1 py-2 rounded bg-zinc-800 border border-zinc-700 text-xs font-bold uppercase tracking-wide">Cancel</button>
@@ -3363,8 +3542,10 @@ export default function HybridAthleteApp() {
                                               </div>
                                             );
                                           })}
+                                          <p className="text-[10px] text-zinc-600">Set scheme: {SET_SCHEME_LABELS[ex.style] || ex.style}</p>
                                           <div className="flex items-center gap-3 flex-wrap">
                                             <button onClick={() => swapToday(ex.id, ex, displayName)} className="text-[11px] text-zinc-500 flex items-center gap-1"><RefreshCw size={11} />Swap exercise</button>
+                                            <button onClick={() => changeSetScheme(entry, ex)} className="text-[11px] text-zinc-500 flex items-center gap-1"><RefreshCw size={11} />Change set scheme</button>
                                             {ex.dropSet === 'occasionally' && log.sets.length === (ex.needsWarmup ? 1 : 0) + ex.sets && (
                                               <button onClick={() => addDropSet(ex)} className="text-[11px] text-amber-500 flex items-center gap-1"><Plus size={11} />Add drop set</button>
                                             )}
@@ -3378,6 +3559,7 @@ export default function HybridAthleteApp() {
                                                   <button key={n} onClick={() => setExerciseRpe(ex, n)} className={`w-7 h-7 rounded text-xs font-mono ${log.rpe === n ? 'bg-amber-500 text-zinc-900' : 'bg-zinc-800 text-zinc-400'}`}>{n}</button>
                                                 ))}
                                               </div>
+                                              {log.rpe != null && <p className="text-[11px] text-zinc-500 mt-1">{RPE_DESCRIPTIONS[log.rpe]}</p>}
                                             </div>
                                           )}
                                         </div>
@@ -3453,7 +3635,7 @@ export default function HybridAthleteApp() {
                                   <p className="text-[10px] text-zinc-500 mb-1">Warm-up</p>
                                   <div className="grid grid-cols-2 gap-2">
                                     <input placeholder="miles" value={safeRun.warmup.distance} onChange={e => updateRunPhase('warmup', 'distance', e.target.value, entry)} className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs" />
-                                    <input placeholder="time" value={safeRun.warmup.time} onChange={e => updateRunPhase('warmup', 'time', e.target.value, entry)} className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs" />
+                                    <input placeholder="time" value={safeRun.warmup.time} onChange={e => updateRunPhase('warmup', 'time', autoFormatMinSec(e.target.value), entry)} className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs" />
                                   </div>
                                   {actualPaceSeconds(safeRun.warmup.distance, safeRun.warmup.time) && <p className="text-[10px] text-zinc-500 mt-1">{paceFromSeconds(actualPaceSeconds(safeRun.warmup.distance, safeRun.warmup.time))}/mi</p>}
                                 </div>
@@ -3467,7 +3649,7 @@ export default function HybridAthleteApp() {
                                         return (
                                           <div key={i} className="flex items-center gap-2">
                                             <span className="text-[10px] text-zinc-500 w-8 font-mono shrink-0">#{i + 1}</span>
-                                            <input placeholder="mm:ss" value={iv.time} onChange={e => updateRunInterval(i, e.target.value, entry)} className="w-20 bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs" />
+                                            <input placeholder="mm:ss" value={iv.time} onChange={e => updateRunInterval(i, autoFormatMinSec(e.target.value), entry)} className="w-20 bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs" />
                                             {diff && <span className={`text-[10px] font-bold ${diff.color}`}>{diff.text}</span>}
                                           </div>
                                         );
@@ -3480,7 +3662,7 @@ export default function HybridAthleteApp() {
                                     <p className="text-[10px] text-zinc-500 mb-1">Tempo portion</p>
                                     <div className="grid grid-cols-2 gap-2">
                                       <input placeholder="miles" value={safeRun.tempo.distance} onChange={e => updateRunPhase('tempo', 'distance', e.target.value, entry)} className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs" />
-                                      <input placeholder="time" value={safeRun.tempo.time} onChange={e => updateRunPhase('tempo', 'time', e.target.value, entry)} className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs" />
+                                      <input placeholder="time" value={safeRun.tempo.time} onChange={e => updateRunPhase('tempo', 'time', autoFormatMinSec(e.target.value), entry)} className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs" />
                                     </div>
                                     {(() => { const actualSec = actualPaceSeconds(safeRun.tempo.distance, safeRun.tempo.time); const diff = actualSec != null ? paceDiffLabel(actualSec, prescribedTempoPaceSec) : null; return actualSec ? (
                                       <p className="text-[10px] mt-1">{paceFromSeconds(actualSec)}/mi{diff && <span className={`ml-1.5 font-bold ${diff.color}`}>{diff.text}</span>}</p>
@@ -3491,7 +3673,7 @@ export default function HybridAthleteApp() {
                                   <p className="text-[10px] text-zinc-500 mb-1">Cooldown</p>
                                   <div className="grid grid-cols-2 gap-2">
                                     <input placeholder="miles" value={safeRun.cooldown.distance} onChange={e => updateRunPhase('cooldown', 'distance', e.target.value, entry)} className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs" />
-                                    <input placeholder="time" value={safeRun.cooldown.time} onChange={e => updateRunPhase('cooldown', 'time', e.target.value, entry)} className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs" />
+                                    <input placeholder="time" value={safeRun.cooldown.time} onChange={e => updateRunPhase('cooldown', 'time', autoFormatMinSec(e.target.value), entry)} className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs" />
                                   </div>
                                   {actualPaceSeconds(safeRun.cooldown.distance, safeRun.cooldown.time) && <p className="text-[10px] text-zinc-500 mt-1">{paceFromSeconds(actualPaceSeconds(safeRun.cooldown.distance, safeRun.cooldown.time))}/mi</p>}
                                 </div>
@@ -3502,6 +3684,7 @@ export default function HybridAthleteApp() {
                                       <button key={n} onClick={() => updateRun('effort', n, entry)} className={`w-7 h-7 rounded text-xs font-mono ${safeRun.effort === n ? 'bg-teal-500 text-zinc-900' : 'bg-zinc-800 text-zinc-400'}`}>{n}</button>
                                     ))}
                                   </div>
+                                  {safeRun.effort != null && <p className="text-[11px] text-zinc-500 mt-1">{RPE_DESCRIPTIONS[safeRun.effort]}</p>}
                                 </div>
                                 <input placeholder="notes (optional)" value={safeRun.notes} onChange={e => updateRun('notes', e.target.value, entry)} className="w-full bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs" />
                               </div>
@@ -3510,7 +3693,7 @@ export default function HybridAthleteApp() {
                               <div className="space-y-2">
                                 <div className="grid grid-cols-2 gap-2">
                                   <input placeholder="actual miles" value={safeRun.distance} onChange={e => updateRun('distance', e.target.value, entry)} className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs" />
-                                  <input placeholder="time (mm:ss)" value={safeRun.time} onChange={e => updateRun('time', e.target.value, entry)} className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs" />
+                                  <input placeholder="time (mm:ss)" value={safeRun.time} onChange={e => updateRun('time', autoFormatMinSec(e.target.value), entry)} className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs" />
                                 </div>
                                 <div>
                                   <p className="text-[11px] text-zinc-500 mb-1">Effort (RPE)</p>
@@ -3519,6 +3702,7 @@ export default function HybridAthleteApp() {
                                       <button key={n} onClick={() => updateRun('effort', n, entry)} className={`w-7 h-7 rounded text-xs font-mono ${safeRun.effort === n ? 'bg-teal-500 text-zinc-900' : 'bg-zinc-800 text-zinc-400'}`}>{n}</button>
                                     ))}
                                   </div>
+                                  {safeRun.effort != null && <p className="text-[11px] text-zinc-500 mt-1">{RPE_DESCRIPTIONS[safeRun.effort]}</p>}
                                 </div>
                                 <input placeholder="notes (optional)" value={safeRun.notes} onChange={e => updateRun('notes', e.target.value, entry)} className="w-full bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs" />
                                 {safeRun.time && <p className="text-[11px] text-teal-400">Logged: {safeRun.distance}mi in {safeRun.time}, RPE {safeRun.effort}</p>}
