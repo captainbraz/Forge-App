@@ -26,6 +26,14 @@ async function listKeys(prefix) {
     return keys;
   } catch (e) { return []; }
 }
+async function removeKey(key) {
+  try { localStorage.removeItem(key); return true; } catch (e) { return false; }
+}
+async function clearAllStorage() {
+  const fixedKeys = ['profile', 'calendar', 'liftTemplate', 'suggestions', 'blockHistory', 'feedback', 'uiState'];
+  const prefixedKeys = [...(await listKeys('log:')), ...(await listKeys('food:'))];
+  for (const key of [...fixedKeys, ...prefixedKeys]) await removeKey(key);
+}
 
 // ---------- date helpers ----------
 function getMonday(d = new Date()) {
@@ -1289,6 +1297,17 @@ function monthsSince(month, year) {
   return (now.getFullYear() - year) * 12 + (now.getMonth() + 1 - month);
 }
 function currentMonthYear() { const now = new Date(); return { month: now.getMonth() + 1, year: now.getFullYear() }; }
+function defaultForm() {
+  const emptySchedule = { Mon: 'rest', Tue: 'rest', Wed: 'rest', Thu: 'rest', Fri: 'rest', Sat: 'rest', Sun: 'rest' };
+  return {
+    name: '', sex: 'male', birthday: { month: 1, day: 1, year: new Date().getFullYear() - 30 }, weightLb: 170, heightIn: 70, activityLevel: 'moderate',
+    trainingMode: 'hybrid', strengthGoal: 'hybrid', runGoal: 'general', experience: 'intermediate', equipment: 'barbell',
+    splitType: 'upper_lower', schedule: { ...emptySchedule }, sessionLengthMin: 60, runDayTypes: {}, liftDayTypes: {},
+    lifts: { squat: { weight: '', reps: '', since: currentMonthYear() }, bench: { weight: '', reps: '', since: currentMonthYear() }, deadlift: { weight: '', reps: '', since: currentMonthYear() }, ohp: { weight: '', reps: '', since: currentMonthYear() } },
+    currentWeeklyMileage: 15, recentRaces: [{ distance: '5k', minutes: '', since: currentMonthYear() }],
+    injuries: [], nutritionGoal: 'maintain'
+  };
+}
 function calcAge(birthday) {
   if (!birthday || !birthday.month || !birthday.day || !birthday.year) return null;
   const today = new Date();
@@ -1490,15 +1509,7 @@ export default function HybridAthleteApp() {
   const [pendingRunTemplate, setPendingRunTemplate] = useState(null);
   const [pendingProfile, setPendingProfile] = useState(null);
 
-  const emptySchedule = { Mon: 'rest', Tue: 'rest', Wed: 'rest', Thu: 'rest', Fri: 'rest', Sat: 'rest', Sun: 'rest' };
-  const [form, setForm] = useState({
-    name: '', sex: 'male', birthday: { month: 1, day: 1, year: new Date().getFullYear() - 30 }, weightLb: 170, heightIn: 70, activityLevel: 'moderate',
-    trainingMode: 'hybrid', strengthGoal: 'hybrid', runGoal: 'general', experience: 'intermediate', equipment: 'barbell',
-    splitType: 'upper_lower', schedule: { ...emptySchedule }, sessionLengthMin: 60, runDayTypes: {}, liftDayTypes: {},
-    lifts: { squat: { weight: '', reps: '', since: currentMonthYear() }, bench: { weight: '', reps: '', since: currentMonthYear() }, deadlift: { weight: '', reps: '', since: currentMonthYear() }, ohp: { weight: '', reps: '', since: currentMonthYear() } },
-    currentWeeklyMileage: 15, recentRaces: [{ distance: '5k', minutes: '', since: currentMonthYear() }],
-    injuries: [], nutritionGoal: 'maintain'
-  });
+  const [form, setForm] = useState(defaultForm());
 
   const [showFoodForm, setShowFoodForm] = useState(false);
   const [foodDraft, setFoodDraft] = useState({ name: '', kcal: '', protein: '', carbs: '', fat: '' });
@@ -1635,6 +1646,33 @@ export default function HybridAthleteApp() {
     setSetupStep(0);
     setHistoryLoaded(false); setExerciseStats({}); setRunStats(null);
     saveKey('profile', null); saveKey('calendar', null);
+  }
+  async function handleFullRestart() {
+    await clearAllStorage();
+    setConfirmRestart(false);
+    setProfile(null);
+    setCalendar(null);
+    setLiftTemplate(null);
+    setLogsByDate({});
+    setSuggestions({});
+    setBlockHistory([]);
+    setFeedbackList([]);
+    setTodayFood([]);
+    setCarryForwardData(null);
+    setForm(defaultForm());
+    setSetupStep(0);
+    setReviewing(false);
+    setConflicts([]);
+    setPendingLiftTemplate(null);
+    setPendingRunTemplate(null);
+    setPendingProfile(null);
+    setTab('dashboard');
+    setWeekIndex(0);
+    setExpandedDate(null);
+    setShowSplash(true);
+    setHistoryLoaded(false);
+    setExerciseStats({});
+    setRunStats(null);
   }
   async function exportAllData() {
     setExporting(true);
@@ -3892,10 +3930,10 @@ export default function HybridAthleteApp() {
           <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-30 px-6">
             <div className="bg-zinc-800 border border-zinc-700 rounded-lg p-4 max-w-xs w-full">
               <p className="text-sm font-bold mb-1">Restart full setup?</p>
-              <p className="text-xs text-zinc-400 mb-4">This erases your current plan and profile. You'll go through onboarding again from scratch.</p>
+              <p className="text-xs text-zinc-400 mb-4">This permanently erases everything — your profile, plan, and all logged workout history. It cannot be undone. You'll go through onboarding again from scratch. If you just want a new plan while keeping your history, use "Start new plan" instead.</p>
               <div className="flex gap-2">
                 <button onClick={() => setConfirmRestart(false)} className="flex-1 py-2 rounded bg-zinc-700 text-xs font-bold uppercase tracking-wide">Cancel</button>
-                <button onClick={() => { setConfirmRestart(false); setProfile(null); setCalendar(null); setSetupStep(0); setReviewing(false); setShowSplash(true); setHistoryLoaded(false); setExerciseStats({}); setRunStats(null); }} className="flex-1 py-2 rounded bg-orange-500 text-zinc-900 text-xs font-bold uppercase tracking-wide">Yes, restart</button>
+                <button onClick={handleFullRestart} className="flex-1 py-2 rounded bg-orange-500 text-zinc-900 text-xs font-bold uppercase tracking-wide">Yes, restart</button>
               </div>
             </div>
           </div>
