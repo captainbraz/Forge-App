@@ -494,8 +494,11 @@ function evaluateExerciseLog(exercise, log) {
     const target = (exercise.setPlan && exercise.setPlan[i]) ? exercise.setPlan[i].targetReps : fallbackMinReps;
     return Number(s.reps) < target;
   });
+  const displayWeight = Math.round(avgWeight * 10) / 10;
+  const didText = minReps != null ? `Did ${minReps} reps at ${displayWeight}lb (RPE ${log.rpe})` : `RPE ${log.rpe} last time`;
   if (log.rpe >= 9 || repsShortfall) {
-    return { direction: 'decrease', newWeight: Math.round((avgWeight * 0.93) / 5) * 5, reason: repsShortfall ? `Missed target reps at RPE ${log.rpe} last time.` : `RPE ${log.rpe} was near max effort — pulling back slightly.` };
+    const newWeight = Math.round((avgWeight * 0.93) / 5) * 5;
+    return { direction: 'decrease', newWeight, reason: `${didText}${repsShortfall ? ' — missed target reps' : ' — near max effort'}. Dropping to ${newWeight}lb next time.` };
   }
   if (log.rpe <= 6 && !repsShortfall) {
     const repHigh = exercise.repHigh;
@@ -504,13 +507,13 @@ function evaluateExerciseLog(exercise, log) {
     // a real weight jump is available, or reps are already maxed out (no more room to progress via reps) -> bump weight
     if (roundedWeight > avgWeight || atRepCeiling) {
       const newWeight = roundedWeight > avgWeight ? roundedWeight : avgWeight + 5;
-      return { direction: 'increase', newWeight, reason: `RPE ${log.rpe} with all reps hit — ready for more.` };
+      return { direction: 'increase', newWeight, reason: `${didText}, all reps hit — ready for more. Try ${newWeight}lb next time.` };
     }
     // the weight math rounds back down to the same number — hold the weight and add a rep instead, if there's room in the rep range
     if (repHigh != null && minReps != null && minReps < repHigh) {
-      return { direction: 'increase_reps', newReps: minReps + 1, reason: `RPE ${log.rpe} with all reps hit, but not quite enough to round up 5lb yet — try ${minReps + 1} reps at the same weight.` };
+      return { direction: 'increase_reps', newReps: minReps + 1, weightForReps: displayWeight, reason: `${didText}, all reps hit — not quite enough to round up 5lb in weight yet. Try ${minReps + 1} reps at ${displayWeight}lb next time (same weight).` };
     }
-    return { direction: 'increase', newWeight: roundedWeight, reason: `RPE ${log.rpe} with all reps hit — ready for more.` };
+    return { direction: 'increase', newWeight: roundedWeight, reason: `${didText}, all reps hit — ready for more. Try ${roundedWeight}lb next time.` };
   }
   return null;
 }
@@ -964,15 +967,23 @@ function buildLiftTemplate(profile, oneRMs) {
   const learnedOneRMs = profile.learnedOneRMs || {};
   const customExercises = profile.customExercises || [];
   const liftDayTypes = profile.liftDayTypes || {};
-  return liftDays.map((weekday, i) => {
-    const dayType = liftDayTypes[weekday] || family.sequence[i % family.sequence.length];
-    const goal = dayTypeGoalOverride[dayType] || profile.strengthGoal;
-    let exercises = buildDayExercises(dayType, i, { equipment: profile.equipment, goal, oneRMs, learnedOneRMs, customExercises });
-    const budget = Number(profile.sessionLengthMin) || 60;
-    exercises = trimToTimeBudget(exercises, budget);
-    exercises = padToTimeBudget(exercises, budget, dayType, i, { equipment: profile.equipment, goal, oneRMs, learnedOneRMs, customExercises });
-    return { weekday, dayType, exercises };
-  });
+  const budget = Number(profile.sessionLengthMin) || 60;
+  const template = [];
+  let cursor = 0; // advances only for days without a manual override, so the split keeps rotating across weeks instead of repeating
+  for (let w = 0; w < 4; w++) {
+    liftDays.forEach((weekday, i) => {
+      const override = liftDayTypes[weekday];
+      const dayType = override || family.sequence[cursor % family.sequence.length];
+      if (!override) cursor++;
+      const goal = dayTypeGoalOverride[dayType] || profile.strengthGoal;
+      const occurrence = w * liftDays.length + i;
+      let exercises = buildDayExercises(dayType, occurrence, { equipment: profile.equipment, goal, oneRMs, learnedOneRMs, customExercises });
+      exercises = trimToTimeBudget(exercises, budget);
+      exercises = padToTimeBudget(exercises, budget, dayType, occurrence, { equipment: profile.equipment, goal, oneRMs, learnedOneRMs, customExercises });
+      template.push({ week: w, weekday, dayType, exercises });
+    });
+  }
+  return template;
 }
 function buildRunTemplate(profile) {
   const runDays = WEEKDAYS.filter(d => profile.schedule[d] === 'run' || profile.schedule[d] === 'lift_run');
@@ -1065,7 +1076,7 @@ function expandToCalendar(profile, liftTemplate, runTemplate) {
     WEEKDAYS.forEach((weekday, di) => {
       const date = addDays(monday, w * 7 + di);
       const entry = { date: dateKey(date), display: formatDate(date), weekday, type: profile.schedule[weekday] };
-      const liftDay = liftTemplate.find(d => d.weekday === weekday);
+      const liftDay = liftTemplate.find(d => d.weekday === weekday && (d.week == null || d.week === w));
       if (liftDay && (entry.type === 'lift' || entry.type === 'lift_run')) {
         entry.lift = { dayType: liftDay.dayType, exercises: liftDay.exercises.map(ex => weightForWeek(ex, w)) };
       }
@@ -1456,6 +1467,11 @@ export default function HybridAthleteApp() {
       const sugg = await loadKey('suggestions');
       const history = await loadKey('blockHistory');
       if (history) setBlockHistory(history);
+      const ui = await loadKey('uiState');
+      if (ui) {
+        if (ui.tab) setTab(ui.tab);
+        if (ui.weekIndex != null) setWeekIndex(ui.weekIndex);
+      }
       const todayStr0 = dateKey(new Date());
       if (p && c) {
         const allDates = c.flatMap(w => Object.values(w.days).map(d => d.date)).sort();
@@ -1483,6 +1499,11 @@ export default function HybridAthleteApp() {
       setLoading(false);
     })();
   }, []);
+
+  useEffect(() => {
+    if (loading) return;
+    saveKey('uiState', { tab, weekIndex });
+  }, [loading, tab, weekIndex]);
 
   useEffect(() => {
     if (!timer || timer.done) return;
@@ -1745,8 +1766,10 @@ export default function HybridAthleteApp() {
   }
   function startEditingProfile() {
     setProfileDraft({
-      name: profile.name, sex: profile.sex, birthday: profile.birthday, weightLb: profile.weightLb,
-      heightIn: profile.heightIn, activityLevel: profile.activityLevel, nutritionGoal: profile.nutritionGoal
+      name: profile.name || '', sex: profile.sex || 'male',
+      birthday: profile.birthday || { month: 1, day: 1, year: new Date().getFullYear() - 30 },
+      weightLb: profile.weightLb || 170, heightIn: profile.heightIn || 70,
+      activityLevel: profile.activityLevel || 'moderate', nutritionGoal: profile.nutritionGoal || 'maintain'
     });
     setEditingProfile(true);
   }
@@ -1949,6 +1972,46 @@ export default function HybridAthleteApp() {
     setShowIndependentRunForm(false);
     setIndependentRunDraft(emptyIndependentRunDraft());
   }
+  function deleteIndependentLift(date, logId) {
+    const currentLog = logsByDate[date];
+    if (!currentLog) return;
+    const nextLog = { ...currentLog, independentLift: currentLog.independentLift.filter(e => e.id !== logId) };
+    setLogsByDate(prev => ({ ...prev, [date]: nextLog }));
+    saveKey(`log:${date}`, nextLog).then(ok => setSaveError(!ok));
+  }
+  function editIndependentLift(date, logId) {
+    const currentLog = logsByDate[date];
+    const exLog = currentLog?.independentLift.find(e => e.id === logId);
+    if (!exLog) return;
+    const custom = (profile.customExercises || []).find(c => c.name === exLog.name);
+    setIndependentLiftDraft(d => ({
+      ...d,
+      liftExercises: [...d.liftExercises, {
+        query: '', name: exLog.name, pattern: exLog.pattern, equipment: custom?.equipment || profile.equipment, isNew: false,
+        sets: exLog.sets.map(s => ({ weight: s.weight, reps: s.reps })), rpe: exLog.rpe
+      }]
+    }));
+    deleteIndependentLift(date, logId);
+    setShowIndependentLiftForm(true);
+  }
+  function deleteIndependentRun(date, logId) {
+    const currentLog = logsByDate[date];
+    if (!currentLog) return;
+    const nextLog = { ...currentLog, independentRun: currentLog.independentRun.filter(e => e.id !== logId) };
+    setLogsByDate(prev => ({ ...prev, [date]: nextLog }));
+    saveKey(`log:${date}`, nextLog).then(ok => setSaveError(!ok));
+  }
+  function editIndependentRun(date, logId) {
+    const currentLog = logsByDate[date];
+    const r = currentLog?.independentRun.find(e => e.id === logId);
+    if (!r) return;
+    setIndependentRunDraft({
+      runType: r.type, runDistance: r.laps?.length ? '' : String(r.distance), runTime: r.laps?.length ? '' : r.time,
+      runEffort: r.effort, runNotes: r.notes || '', runOverride: 'keep', laps: r.laps || []
+    });
+    deleteIndependentRun(date, logId);
+    setShowIndependentRunForm(true);
+  }
   function removeLastSet(exId) {
     updateDayLog(log => {
       const exLog = log.lift[exId];
@@ -2025,7 +2088,11 @@ export default function HybridAthleteApp() {
       ...week,
       days: Object.fromEntries(Object.entries(week.days).map(([wd, entry]) => {
         if (entry.lift && entry.date > fromDate) {
-          const exercises = entry.lift.exercises.map(ex => ex.id === exId ? { ...ex, weight: newWeight } : ex);
+          const exercises = entry.lift.exercises.map(ex => {
+            if (ex.id !== exId) return ex;
+            const setPlan = buildSetPlan({ sets: ex.sets, repLow: ex.repLow, repHigh: ex.repHigh, style: ex.style, dropSet: ex.dropSet, weight: newWeight, needsWarmup: ex.needsWarmup });
+            return { ...ex, weight: newWeight, setPlan, loadNote: null, weightSource: 'learned', repTarget: null };
+          });
           return [wd, { ...entry, lift: { ...entry.lift, exercises } }];
         }
         return [wd, entry];
@@ -2039,7 +2106,11 @@ export default function HybridAthleteApp() {
       ...week,
       days: Object.fromEntries(Object.entries(week.days).map(([wd, entry]) => {
         if (entry.lift && entry.date > fromDate) {
-          const exercises = entry.lift.exercises.map(ex => ex.id === exId ? { ...ex, repLow: newReps, reps: repsDisplay(newReps, ex.repHigh) } : ex);
+          const exercises = entry.lift.exercises.map(ex => {
+            if (ex.id !== exId) return ex;
+            const setPlan = ex.setPlan ? ex.setPlan.map(p => p.isDrop ? p : { ...p, targetReps: newReps }) : ex.setPlan;
+            return { ...ex, repTarget: newReps, setPlan };
+          });
           return [wd, { ...entry, lift: { ...entry.lift, exercises } }];
         }
         return [wd, entry];
@@ -3019,9 +3090,11 @@ export default function HybridAthleteApp() {
                         <p className="text-xs font-bold text-teal-400 uppercase tracking-wide">Extra lift work logged</p>
                         {dayLog.independentLift.map(exLog => (
                           <div key={exLog.id} className="text-sm">
-                            <div className="flex items-center justify-between">
-                              <span>{exLog.name}</span>
-                              {exLog.rpe != null && <span className="text-[10px] text-zinc-500">RPE {exLog.rpe}</span>}
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="flex-1">{exLog.name}</span>
+                              {exLog.rpe != null && <span className="text-[10px] text-zinc-500 shrink-0">RPE {exLog.rpe}</span>}
+                              <button onClick={() => editIndependentLift(entry.date, exLog.id)} className="text-[10px] text-teal-400 font-bold uppercase shrink-0">Edit</button>
+                              <button onClick={() => deleteIndependentLift(entry.date, exLog.id)} className="text-zinc-600 shrink-0"><X size={12} /></button>
                             </div>
                             <p className="text-[11px] text-zinc-500 font-mono">{exLog.sets.map(s => `${s.weight}x${s.reps}`).join(', ')}</p>
                           </div>
@@ -3086,9 +3159,11 @@ export default function HybridAthleteApp() {
                         <p className="text-xs font-bold text-teal-400 uppercase tracking-wide">Extra run logged</p>
                         {dayLog.independentRun.map(r => (
                           <div key={r.id} className="text-sm">
-                            <div className="flex items-center justify-between">
-                              <span>{r.type} run</span>
-                              <span className="font-mono text-xs text-zinc-400">{r.distance}mi · {r.time}{r.effort != null ? ` · RPE ${r.effort}` : ''}</span>
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="flex-1">{r.type} run</span>
+                              <span className="font-mono text-xs text-zinc-400 shrink-0">{r.distance}mi · {r.time}{r.effort != null ? ` · RPE ${r.effort}` : ''}</span>
+                              <button onClick={() => editIndependentRun(entry.date, r.id)} className="text-[10px] text-teal-400 font-bold uppercase shrink-0">Edit</button>
+                              <button onClick={() => deleteIndependentRun(entry.date, r.id)} className="text-zinc-600 shrink-0"><X size={12} /></button>
                             </div>
                             {r.laps?.length > 0 && (
                               <div className="mt-1 pl-2 border-l border-zinc-700 space-y-0.5">
@@ -3202,7 +3277,7 @@ export default function HybridAthleteApp() {
                                     <div key={ex.id}>
                                       <div className="flex items-center justify-between text-sm">
                                         <span>{ex.name}</span>
-                                        <span className="font-mono text-xs text-zinc-400">{ex.sets}x{ex.reps}{ex.weight ? ` @ ${ex.weight}lb` : ''}{!ex.weight ? ` · ${ex.loadNote}` : ''}</span>
+                                        <span className="font-mono text-xs text-zinc-400">{ex.sets}x{ex.repTarget || ex.reps}{ex.weight ? ` @ ${ex.weight}lb` : ''}{!ex.weight ? ` · ${ex.loadNote}` : ''}</span>
                                       </div>
                                       {exerciseNote(ex) && <p className="text-[10px] text-amber-600/80">{exerciseNote(ex)}</p>}
                                       {weightSourceNote(ex) && <p className="text-[10px] text-zinc-600">{weightSourceNote(ex)}</p>}
@@ -3245,7 +3320,7 @@ export default function HybridAthleteApp() {
                                           {log.rpe != null && <Check size={13} className="text-teal-400" />}
                                           {displayName}
                                         </span>
-                                        <span className="font-mono text-xs text-zinc-400">{ex.sets}x{ex.reps}{ex.weight ? ` @ ${ex.weight}lb` : ''}</span>
+                                        <span className="font-mono text-xs text-zinc-400">{ex.sets}x{ex.repTarget || ex.reps}{ex.weight ? ` @ ${ex.weight}lb` : ''}</span>
                                       </button>
                                       {suggestions[ex.id] && entry.date > suggestions[ex.id].fromDate && (
                                         <div className="mt-1.5 bg-zinc-800 border border-amber-600/40 rounded px-2 py-1.5 flex items-center justify-between gap-2">
