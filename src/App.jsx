@@ -304,14 +304,19 @@ const exerciseAreaOverride = {
 };
 function areasForExercise(pattern, name) { return exerciseAreaOverride[name] || patternAreaMap[pattern] || []; }
 
+// Every split cycles its `sequence` continuously across the whole 4-week block via a running cursor
+// (see buildLiftTemplate), so any of these works at any lift-days/week count — the sequence just wraps
+// around (or, for longer sequences, spreads across more calendar time). `recommendedDays` is a display
+// hint only, not a restriction, since the split picker shows every option regardless of day count.
 const splitFamilies = {
-  full_body: { label: 'Full Body', sequence: ['Full Body A', 'Full Body B', 'Full Body C'] },
-  upper_lower: { label: 'Upper / Lower', sequence: ['Upper A', 'Lower A', 'Upper B', 'Lower B'] },
-  ppl: { label: 'Push / Pull / Legs', sequence: ['Push', 'Pull', 'Legs'] },
-  ppl_fb: { label: 'Push / Pull / Legs / Full Body', sequence: ['Push', 'Pull', 'Legs', 'Full Body A'], onlyForDayCount: 4 },
-  bro_split: { label: 'Body Part Split', sequence: ['Chest', 'Back', 'Shoulders', 'Legs', 'Arms'], onlyForDayCount: 5 },
-  arnold: { label: 'Arnold Split', sequence: ['Chest & Back A', 'Shoulders & Arms A', 'Legs A', 'Chest & Back B', 'Shoulders & Arms B', 'Legs B'], onlyForDayCount: 6 },
-  phul: { label: 'Power Hypertrophy Upper Lower (PHUL)', sequence: ['Power Upper', 'Power Lower', 'Hyper Upper', 'Hyper Lower'], onlyForDayCount: 4 }
+  full_body: { label: 'Full Body', sequence: ['Full Body A', 'Full Body B', 'Full Body C'], recommendedDays: '2-3' },
+  upper_lower: { label: 'Upper / Lower', sequence: ['Upper A', 'Lower A', 'Upper B', 'Lower B'], recommendedDays: '2, 4, or 6' },
+  ppl: { label: 'Push / Pull / Legs', sequence: ['Push', 'Pull', 'Legs'], recommendedDays: '3 or 6' },
+  ppl_fb: { label: 'Push / Pull / Legs / Full Body', sequence: ['Push', 'Pull', 'Legs', 'Full Body A'], recommendedDays: '4' },
+  ppl_ul: { label: 'Push / Pull / Legs / Upper / Lower', sequence: ['Push', 'Pull', 'Legs', 'Upper A', 'Lower A'], recommendedDays: '5' },
+  bro_split: { label: 'Body Part Split', sequence: ['Chest', 'Back', 'Shoulders', 'Legs', 'Arms'], recommendedDays: '5' },
+  arnold: { label: 'Arnold Split', sequence: ['Chest & Back A', 'Shoulders & Arms A', 'Legs A', 'Chest & Back B', 'Shoulders & Arms B', 'Legs B'], recommendedDays: '6' },
+  phul: { label: 'Power Hypertrophy Upper Lower (PHUL)', sequence: ['Power Upper', 'Power Lower', 'Hyper Upper', 'Hyper Lower'], recommendedDays: '4' }
 };
 const patternsByDayType = {
   'Full Body A': ['squat', 'pushHoriz', 'pullHoriz', 'core'],
@@ -2606,7 +2611,7 @@ export default function HybridAthleteApp() {
                 <>
                   <Field label={`Split (${liftDayCount} lift day${liftDayCount === 1 ? '' : 's'}/wk)`}>
                     <select value={form.splitType} onChange={e => setForm({ ...form, splitType: e.target.value, liftDayTypes: {} })} className={inputCls}>
-                      {Object.entries(splitFamilies).filter(([, f]) => !f.onlyForDayCount || f.onlyForDayCount === liftDayCount).map(([id, f]) => <option key={id} value={id}>{f.label}</option>)}
+                      {Object.entries(splitFamilies).map(([id, f]) => <option key={id} value={id}>{f.label} (best at {f.recommendedDays}/wk)</option>)}
                     </select>
                   </Field>
                   <div>
@@ -2987,7 +2992,7 @@ export default function HybridAthleteApp() {
                   </Field>
                   <Field label={`Split (${draftLiftDayCount} lift day${draftLiftDayCount === 1 ? '' : 's'}/wk)`}>
                     <select value={trainingSetupDraft.splitType} onChange={e => setTrainingSetupDraft({ ...trainingSetupDraft, splitType: e.target.value, liftDayTypes: {} })} className={inputCls}>
-                      {Object.entries(splitFamilies).filter(([, f]) => !f.onlyForDayCount || f.onlyForDayCount === draftLiftDayCount).map(([id, f]) => <option key={id} value={id}>{f.label}</option>)}
+                      {Object.entries(splitFamilies).map(([id, f]) => <option key={id} value={id}>{f.label} (best at {f.recommendedDays}/wk)</option>)}
                     </select>
                   </Field>
                   <div>
