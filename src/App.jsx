@@ -2,8 +2,15 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   LayoutDashboard, Dumbbell, Activity, UtensilsCrossed, Flame, Settings,
   ChevronRight, ChevronLeft, Plus, X, Check, AlertTriangle, CalendarDays, RefreshCw, Timer,
-  User, BarChart3
+  User, BarChart3, Mail
 } from 'lucide-react';
+
+const FEEDBACK_EMAIL = 'akathecaptain@gmail.com';
+function feedbackMailtoHref(text, date) {
+  const subject = encodeURIComponent('Forge feedback');
+  const body = encodeURIComponent(`${text}\n\n(logged ${date} in-app)`);
+  return `mailto:${FEEDBACK_EMAIL}?subject=${subject}&body=${body}`;
+}
 
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const INJURY_AREAS = ['Knee', 'Lower back', 'Shoulder', 'Elbow', 'Wrist', 'Hip', 'Ankle', 'Hamstring', 'Achilles', 'Neck', 'Other'];
@@ -556,6 +563,8 @@ function bestOneRMFromSets(sets) {
   return best;
 }
 function computeLearnedOneRM(exercise, log) {
+  // Submax sets (RPE <= 6) had reps in reserve — trusting their Epley 1RM overshoots future prescriptions.
+  if (log.rpe != null && log.rpe < 7) return null;
   const warmupOffset = exercise.needsWarmup ? 1 : 0;
   return bestOneRMFromSets(log.sets.slice(warmupOffset, warmupOffset + exercise.sets));
 }
@@ -967,13 +976,24 @@ function calcTDEE({ sex, birthday, heightIn, weightLb, activityLevel }) {
   const mult = { sedentary: 1.2, light: 1.375, moderate: 1.55, active: 1.725, veryActive: 1.9 }[activityLevel] || 1.55;
   return { tdee: bmr * mult, weightKg };
 }
-function calcMacros({ weightKg, tdee, goal }) {
-  const adj = goal === 'cut' ? -0.15 : goal === 'bulk' ? 0.1 : 0;
-  const targetCals = Math.round(tdee * (1 + adj));
+function calcMacros({ weightKg, tdee, goal, intensity = 'standard' }) {
+  // 2 lb/week is the generally-cited ceiling for fat loss that doesn't also eat into muscle — 1 lb fat ~= 3500 kcal, so 2 lb/wk = 1000 kcal/day.
+  const AGGRESSIVE_CUT_CAP_KCAL_PER_DAY = 1000;
+  let netKcal = 0;
+  if (goal === 'cut') {
+    const pct = intensity === 'aggressive' ? 0.25 : 0.15;
+    netKcal = -Math.min(tdee * pct, intensity === 'aggressive' ? AGGRESSIVE_CUT_CAP_KCAL_PER_DAY : Infinity);
+  } else if (goal === 'bulk') {
+    const pct = intensity === 'aggressive' ? 0.2 : 0.1;
+    netKcal = tdee * pct;
+  }
+  const targetCals = Math.round(tdee + netKcal);
   const proteinG = Math.round(weightKg * 2.0);
   const fatG = Math.round((targetCals * 0.25) / 9);
   const carbG = Math.round((targetCals - proteinG * 4 - fatG * 9) / 4);
-  return { targetCals, proteinG, fatG, carbG };
+  const lbPerWeek = +((netKcal * 7) / 3500).toFixed(1);
+  const pctFromTdee = tdee ? Math.round((netKcal / tdee) * 100) : 0;
+  return { targetCals, proteinG, fatG, carbG, lbPerWeek, pctFromTdee, intensity };
 }
 function estimateLiftCalories(liftEntry, log, profile) {
   if (!liftEntry || !log || !log.liftCompletedAt) return 0;
@@ -1252,7 +1272,7 @@ function computeLiftComplete(entry, log) {
     const exLog = log.lift[ex.id];
     if (!exLog || exLog.skipped) return true;
     if (exLog.rpe == null) return false;
-    return exLog.sets.every(s => s.done);
+    return exLog.sets.every(s => s.done && Number(s.weight) > 0);
   });
 }
 function computeRunComplete(entry, log, profile) {
@@ -1502,8 +1522,13 @@ export default function HybridAthleteApp() {
   const [feedbackList, setFeedbackList] = useState([]);
   const [confirmRestart, setConfirmRestart] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [pendingImportBundle, setPendingImportBundle] = useState(null);
+  const [importError, setImportError] = useState('');
+  const importFileRef = useRef(null);
   const [showProfile, setShowProfile] = useState(false);
   const [editingProfile, setEditingProfile] = useState(false);
+  const [weighInDraftLb, setWeighInDraftLb] = useState(null);
   const [showEditTrainingSetup, setShowEditTrainingSetup] = useState(false);
   const [trainingSetupDraft, setTrainingSetupDraft] = useState(null);
   const [showStartNewPlan, setShowStartNewPlan] = useState(false);
@@ -1535,7 +1560,7 @@ export default function HybridAthleteApp() {
 
   useEffect(() => {
     (async () => {
-      const p = await loadKey('profile');
+      let p = await loadKey('profile');
       let c = await loadKey('calendar');
       let lt = await loadKey('liftTemplate');
       const f = await loadKey(todayKey());
@@ -1561,6 +1586,10 @@ export default function HybridAthleteApp() {
           lt = fresh.lt; c = fresh.calendar;
           await saveKey('calendar', c); await saveKey('liftTemplate', lt);
         }
+      }
+      if (p && !p.lastWeighInDate) {
+        p = { ...p, lastWeighInDate: todayStr0 };
+        await saveKey('profile', p);
       }
       setProfile(p); setCalendar(c); setLiftTemplate(lt);
       if (f) setTodayFood(f);
@@ -1644,7 +1673,7 @@ export default function HybridAthleteApp() {
         ohp: recent.ohp || profile.oneRMs?.ohp || null
       };
     }
-    setCarryForwardData({ oneRMs: carriedOneRMs, learnedOneRMs: profile.learnedOneRMs || {}, customExercises: profile.customExercises || [] });
+    setCarryForwardData({ oneRMs: carriedOneRMs, learnedOneRMs: profile.learnedOneRMs || {}, customExercises: profile.customExercises || [], weightHistory: profile.weightHistory || [], weeklyWeighInEnabled: profile.weeklyWeighInEnabled, lastWeighInDate: profile.lastWeighInDate });
     setForm({
       ...form,
       name: profile.name, sex: profile.sex, birthday: profile.birthday, weightLb: profile.weightLb, heightIn: profile.heightIn, activityLevel: profile.activityLevel,
@@ -1711,6 +1740,42 @@ export default function HybridAthleteApp() {
       URL.revokeObjectURL(url);
     } catch (e) { console.error('export failed', e); }
     setExporting(false);
+  }
+  function handleImportFileSelected(e) {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    setImportError('');
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const bundle = JSON.parse(reader.result);
+        if (!bundle || !bundle.profile || !bundle.calendar) throw new Error('missing profile/calendar');
+        setPendingImportBundle(bundle);
+      } catch {
+        setImportError('That file doesn\'t look like a Forge backup.');
+      }
+    };
+    reader.onerror = () => setImportError('Could not read that file.');
+    reader.readAsText(file);
+  }
+  async function confirmImportData() {
+    const bundle = pendingImportBundle;
+    if (!bundle) return;
+    setImporting(true);
+    try {
+      await clearAllStorage();
+      const fixed = { profile: bundle.profile, calendar: bundle.calendar, liftTemplate: bundle.liftTemplate, suggestions: bundle.suggestions, blockHistory: bundle.blockHistory, feedback: bundle.feedback };
+      for (const [key, value] of Object.entries(fixed)) { if (value != null) await saveKey(key, value); }
+      for (const [key, value] of Object.entries(bundle.logs || {})) await saveKey(key, value);
+      for (const [key, value] of Object.entries(bundle.food || {})) await saveKey(key, value);
+      window.location.reload();
+    } catch (e) {
+      console.error('import failed', e);
+      setImportError('Import failed partway through — reload the app and re-import the backup file.');
+      setImporting(false);
+      setPendingImportBundle(null);
+    }
   }
   async function toggleDay(entry) {
     if (expandedDate === entry.date) { setExpandedDate(null); setExpandedExerciseId(null); setSessionFocus(null); return; }
@@ -1786,21 +1851,30 @@ export default function HybridAthleteApp() {
     const currentLog = logsByDate[expandedDate];
     const nextLift = {};
     const missingRpeIds = [];
+    const missingWeightIds = [];
     entry.lift.exercises.forEach(ex => {
       const exLog = currentLog.lift[ex.id];
       if (exLog.skipped) { nextLift[ex.id] = exLog; return; }
       const sets = exLog.sets.map(s => ({ ...s, done: true }));
       nextLift[ex.id] = { ...exLog, sets };
       if (exLog.rpe == null) missingRpeIds.push(ex.id);
+      if (sets.some(s => !(Number(s.weight) > 0))) missingWeightIds.push(ex.id);
     });
     const allRated = missingRpeIds.length === 0;
+    const allWeighted = missingWeightIds.length === 0;
     const nextLog = {
       ...currentLog, lift: nextLift,
-      liftCompletedAt: allRated ? new Date().toISOString() : null,
-      liftEverCompleted: allRated ? true : currentLog.liftEverCompleted
+      liftCompletedAt: (allRated && allWeighted) ? new Date().toISOString() : null,
+      liftEverCompleted: (allRated && allWeighted) ? true : currentLog.liftEverCompleted
     };
     setLogsByDate(prev => ({ ...prev, [expandedDate]: nextLog }));
     saveKey(`log:${expandedDate}`, nextLog).then(ok => setSaveError(!ok));
+    if (!allWeighted) {
+      setPendingRpeQueue(missingRpeIds);
+      setExpandedExerciseId(missingWeightIds[0]);
+      setLiftCompleteMessage(`Enter a weight for ${missingWeightIds.length} more exercise${missingWeightIds.length === 1 ? '' : 's'} to finish.`);
+      return;
+    }
     if (!allRated) {
       setPendingRpeQueue(missingRpeIds);
       setExpandedExerciseId(missingRpeIds[0]);
@@ -1816,6 +1890,7 @@ export default function HybridAthleteApp() {
       if (log && log.rpe != null) {
         const evaluation = evaluateExerciseLog(ex, log);
         if (evaluation) nextSuggestions[ex.id] = { ...evaluation, exerciseName: log.swappedName || ex.name, fromDate: expandedDate };
+        else delete nextSuggestions[ex.id];
       }
     });
     setSuggestions(nextSuggestions);
@@ -1896,6 +1971,25 @@ export default function HybridAthleteApp() {
     setEditingProfile(false);
     setProfileDraft(null);
   }
+  function setNutritionIntensity(intensity) {
+    const nextProfile = { ...profile, nutritionIntensity: intensity };
+    setProfile(nextProfile); saveKey('profile', nextProfile);
+  }
+  function toggleWeeklyWeighIn() {
+    const nextProfile = { ...profile, weeklyWeighInEnabled: profile.weeklyWeighInEnabled === false };
+    setProfile(nextProfile); saveKey('profile', nextProfile);
+  }
+  function recordWeighIn(weightLb) {
+    const today = dateKey(new Date());
+    const nextProfile = { ...profile, weightLb, weightHistory: [...(profile.weightHistory || []), { date: today, weightLb }], lastWeighInDate: today };
+    setProfile(nextProfile); saveKey('profile', nextProfile);
+    setWeighInDraftLb(null);
+  }
+  function skipWeighIn() {
+    const nextProfile = { ...profile, lastWeighInDate: dateKey(new Date()) };
+    setProfile(nextProfile); saveKey('profile', nextProfile);
+    setWeighInDraftLb(null);
+  }
   function startEditingTrainingSetup() {
     setTrainingSetupDraft({
       strengthGoal: profile.strengthGoal, runGoal: profile.runGoal, equipment: profile.equipment,
@@ -1919,6 +2013,9 @@ export default function HybridAthleteApp() {
     const exerciseName = nextExLog.swappedName || ex.name;
     if (evaluation) {
       const next = { ...suggestions, [ex.id]: { ...evaluation, exerciseName, fromDate: expandedDate } };
+      setSuggestions(next); saveKey('suggestions', next);
+    } else if (suggestions[ex.id]) {
+      const next = { ...suggestions }; delete next[ex.id];
       setSuggestions(next); saveKey('suggestions', next);
     }
     const learned = computeLearnedOneRM(ex, nextExLog);
@@ -2319,10 +2416,14 @@ export default function HybridAthleteApp() {
     const oneRMs = carryForwardData ? { ...computedOneRMs, ...carryForwardData.oneRMs } : computedOneRMs;
     const bestRace = includesRunning ? bestRaceEstimate(form.recentRaces) : null;
     const vdot = bestRace ? computeVDOT(DIST_MILES[bestRace.distance], parseMinutesInput(bestRace.minutes)) : null;
+    const today = dateKey(new Date());
     const p = {
       ...form, oneRMs, vdot,
       learnedOneRMs: carryForwardData ? carryForwardData.learnedOneRMs : {},
-      customExercises: carryForwardData ? carryForwardData.customExercises : []
+      customExercises: carryForwardData ? carryForwardData.customExercises : [],
+      weightHistory: carryForwardData ? carryForwardData.weightHistory : [{ date: today, weightLb: form.weightLb }],
+      weeklyWeighInEnabled: carryForwardData ? carryForwardData.weeklyWeighInEnabled : true,
+      lastWeighInDate: carryForwardData ? carryForwardData.lastWeighInDate : today
     };
     const lt = includesStrength ? buildLiftTemplate(p, oneRMs) : [];
     const rt = includesRunning ? buildRunTemplate(p) : [];
@@ -2398,6 +2499,11 @@ export default function HybridAthleteApp() {
   }
 
   const todayStr = dateKey(new Date());
+  const weighInDue = useMemo(() => {
+    if (!profile || profile.weeklyWeighInEnabled === false || !profile.lastWeighInDate) return false;
+    const diffDays = Math.round((new Date(todayStr) - new Date(profile.lastWeighInDate)) / 86400000);
+    return diffDays >= 7;
+  }, [profile, todayStr]);
   const currentWeekIdx = useMemo(() => {
     if (!calendar) return 0;
     const idx = calendar.findIndex(w => Object.values(w.days).some(d => d.date === todayStr));
@@ -2422,7 +2528,7 @@ export default function HybridAthleteApp() {
   const macros = useMemo(() => {
     if (!profile) return null;
     const { tdee, weightKg } = calcTDEE(profile);
-    return calcMacros({ weightKg, tdee: tdee + todayWorkoutCalories, goal: profile.nutritionGoal });
+    return calcMacros({ weightKg, tdee: tdee + todayWorkoutCalories, goal: profile.nutritionGoal, intensity: profile.nutritionIntensity });
   }, [profile, todayWorkoutCalories]);
   const foodTotals = useMemo(() => todayFood.reduce((acc, f) => ({ kcal: acc.kcal + f.kcal, protein: acc.protein + f.protein, carbs: acc.carbs + f.carbs, fat: acc.fat + f.fat }), { kcal: 0, protein: 0, carbs: 0, fat: 0 }), [todayFood]);
 
@@ -2434,7 +2540,8 @@ export default function HybridAthleteApp() {
       const entry = week.days[d];
       const s = entry.lift ? (profile.strengthGoal === 'strength' ? 3 : 2) : 0;
       const r = entry.run ? ({ Easy: 1, Tempo: 2, Quality: 2, Long: 3 }[entry.run.type] || 0) : 0;
-      loads[d] = { strength: s, running: r };
+      const hardDay = !!(entry.run && (entry.run.type === 'Quality' || entry.run.type === 'Tempo'));
+      loads[d] = { strength: s, running: r, hardDay };
     });
     return loads;
   }, [calendar, weekIndex, profile]);
@@ -2496,7 +2603,27 @@ export default function HybridAthleteApp() {
             <span className="flex items-center gap-1.5"><UtensilsCrossed size={13} className="text-stone-300" />Fuel</span>
           </div>
           <button onClick={() => setShowSplash(false)} className="w-full py-3 rounded bg-gradient-to-r from-amber-500 to-teal-400 text-zinc-900 text-sm font-black uppercase tracking-widest">Get Started</button>
+          <button onClick={() => { setImportError(''); importFileRef.current?.click(); }} className="mt-4 text-xs text-zinc-500 underline">Restore from a backup file instead</button>
+          <input ref={importFileRef} type="file" accept="application/json" onChange={handleImportFileSelected} className="hidden" />
         </div>
+        {pendingImportBundle && (
+          <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-30 px-6">
+            <div className="bg-zinc-800 border border-zinc-700 rounded-lg p-4 max-w-xs w-full">
+              <p className="text-sm font-bold mb-1">Import this backup?</p>
+              <p className="text-xs text-zinc-400 mb-4">This restores the profile, plan, and logged history from the selected file{pendingImportBundle.exportedAt ? ` (exported ${formatDate(new Date(pendingImportBundle.exportedAt))})` : ''}.</p>
+              <div className="flex gap-2">
+                <button onClick={() => setPendingImportBundle(null)} disabled={importing} className="flex-1 py-2 rounded bg-zinc-700 text-xs font-bold uppercase tracking-wide">Cancel</button>
+                <button onClick={confirmImportData} disabled={importing} className="flex-1 py-2 rounded bg-amber-500 text-zinc-900 text-xs font-bold uppercase tracking-wide">{importing ? 'Importing...' : 'Yes, import'}</button>
+              </div>
+            </div>
+          </div>
+        )}
+        {importError && (
+          <div className="fixed bottom-6 inset-x-0 max-w-md mx-auto bg-orange-500 text-zinc-900 px-4 py-2 flex items-center justify-between font-mono text-xs font-bold z-10">
+            <span>{importError}</span>
+            <button onClick={() => setImportError('')} className="uppercase tracking-wide underline shrink-0 ml-2">Dismiss</button>
+          </div>
+        )}
       </div>
     );
   }
@@ -2896,6 +3023,17 @@ export default function HybridAthleteApp() {
               )}
             </Card>
             <Card>
+              <div className="flex items-center justify-between">
+                <div>
+                  <SectionHeader>Weekly weigh-in reminder</SectionHeader>
+                  <p className="text-[11px] text-zinc-500 mt-1">Prompts you to update your weight every 7 days so calorie targets stay accurate.</p>
+                </div>
+                <button onClick={toggleWeeklyWeighIn} className={`shrink-0 text-[11px] font-bold uppercase tracking-wide px-3 py-1.5 rounded ${profile.weeklyWeighInEnabled !== false ? 'bg-teal-500 text-zinc-900' : 'bg-zinc-800 text-zinc-400 border border-zinc-700'}`}>
+                  {profile.weeklyWeighInEnabled !== false ? 'On' : 'Off'}
+                </button>
+              </div>
+            </Card>
+            <Card>
               <SectionHeader accent="amber">Main Lift Records</SectionHeader>
               <div className="grid grid-cols-4 gap-2 mt-2 text-center font-mono">
                 {liftRecords.map(r => (
@@ -3169,10 +3307,13 @@ export default function HybridAthleteApp() {
             <h1 className="text-lg font-black uppercase tracking-widest">Feedback & ideas</h1>
             <button onClick={() => setShowFeedback(false)} className="text-sm font-bold text-teal-400 uppercase tracking-wide">Done</button>
           </div>
-          <p className="text-xs text-zinc-500 mb-3">A running list of bugs, ideas, and things to revisit — kept on this device alongside the rest of your data (included in "Export my data").</p>
+          <p className="text-xs text-zinc-500 mb-3">A running list of bugs, ideas, and things to revisit — kept on this device alongside the rest of your data (included in "Export my data"). Tap the mail icon on an entry to actually send it — nothing leaves this device on its own.</p>
           <div className="space-y-2 mb-4">
             <textarea value={feedbackDraft} onChange={e => setFeedbackDraft(e.target.value)} placeholder="Found something off, or have an idea?" rows={3} className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-2 text-sm text-stone-100" />
-            <button onClick={saveFeedbackEntry} className="w-full py-2 rounded bg-teal-500 text-zinc-900 text-sm font-bold uppercase tracking-wide">Add</button>
+            <div className="flex gap-2">
+              <button onClick={saveFeedbackEntry} className="flex-1 py-2 rounded bg-zinc-800 border border-zinc-700 text-sm font-bold uppercase tracking-wide">Save here</button>
+              <a href={feedbackDraft.trim() ? feedbackMailtoHref(feedbackDraft.trim(), dateKey(new Date())) : undefined} onClick={e => { if (!feedbackDraft.trim()) { e.preventDefault(); return; } saveFeedbackEntry(); }} className={`flex-1 py-2 rounded text-sm font-bold uppercase tracking-wide text-center flex items-center justify-center gap-1.5 ${feedbackDraft.trim() ? 'bg-teal-500 text-zinc-900' : 'bg-zinc-800 text-zinc-600 border border-zinc-700 pointer-events-none'}`}><Mail size={14} />Send</a>
+            </div>
           </div>
           {feedbackList.length === 0 ? (
             <p className="text-sm text-zinc-500">Nothing logged yet.</p>
@@ -3182,6 +3323,7 @@ export default function HybridAthleteApp() {
                 <Card key={f.id}>
                   <div className="flex items-start justify-between gap-2">
                     <p className="text-sm text-zinc-200 flex-1">{f.text}</p>
+                    <a href={feedbackMailtoHref(f.text, f.date)} className="text-teal-400 shrink-0" title="Send this to the developer"><Mail size={14} /></a>
                     <button onClick={() => deleteFeedbackEntry(f.id)} className="text-zinc-600 shrink-0"><X size={14} /></button>
                   </div>
                   <p className="text-[10px] text-zinc-600 mt-1">{f.date}</p>
@@ -3215,6 +3357,7 @@ export default function HybridAthleteApp() {
                 <button onClick={() => { setShowSettingsMenu(false); startEditingTrainingSetup(); }} className="w-full text-left px-3 py-2.5 text-sm hover:bg-zinc-700 border-t border-zinc-700">Edit training setup</button>
                 <button onClick={() => { setShowSettingsMenu(false); setShowRpeGuide(true); }} className="w-full text-left px-3 py-2.5 text-sm hover:bg-zinc-700 border-t border-zinc-700">RPE guide</button>
                 <button onClick={() => { setShowSettingsMenu(false); exportAllData(); }} disabled={exporting} className="w-full text-left px-3 py-2.5 text-sm hover:bg-zinc-700 border-t border-zinc-700">{exporting ? 'Exporting...' : 'Export my data'}</button>
+                <button onClick={() => { setShowSettingsMenu(false); setImportError(''); importFileRef.current?.click(); }} className="w-full text-left px-3 py-2.5 text-sm hover:bg-zinc-700 border-t border-zinc-700">Import my data</button>
                 <button onClick={() => { setShowSettingsMenu(false); setShowBlockHistory(true); }} className="w-full text-left px-3 py-2.5 text-sm hover:bg-zinc-700 border-t border-zinc-700">Past blocks{blockHistory.length > 0 ? ` (${blockHistory.length})` : ''}</button>
                 <button onClick={() => { setShowSettingsMenu(false); setShowChangelog(true); }} className="w-full text-left px-3 py-2.5 text-sm hover:bg-zinc-700 border-t border-zinc-700">Changelog</button>
                 <button onClick={() => { setShowSettingsMenu(false); setShowFeedback(true); }} className="w-full text-left px-3 py-2.5 text-sm hover:bg-zinc-700 border-t border-zinc-700">Feedback & ideas</button>
@@ -3225,6 +3368,7 @@ export default function HybridAthleteApp() {
             </div>
           </div>
         </header>
+        <input ref={importFileRef} type="file" accept="application/json" onChange={handleImportFileSelected} className="hidden" />
 
         <main className="flex-1 overflow-y-auto px-4 pb-24 space-y-4">
           {tab === 'dashboard' && (
@@ -3241,7 +3385,7 @@ export default function HybridAthleteApp() {
                           {l.running > 0 && <div className="w-full bg-teal-400" style={{ height: `${(l.running / maxLoad) * 100}%` }} />}
                         </div>
                         <span className="text-[10px] text-zinc-500 mt-1 font-mono">{d}</span>
-                        {total >= 5 && <Flame size={10} className="text-orange-500 -mt-0.5" />}
+                        {(total >= 5 || l.hardDay) && <Flame size={10} className="text-orange-500 -mt-0.5" />}
                       </div>
                     );
                   })}
@@ -3800,6 +3944,20 @@ export default function HybridAthleteApp() {
                   <div><div className="text-lg font-bold text-teal-400">{macros.carbG}</div><div className="text-[10px] text-zinc-500 uppercase">carbs</div></div>
                   <div><div className="text-lg font-bold text-stone-300">{macros.fatG}</div><div className="text-[10px] text-zinc-500 uppercase">fat</div></div>
                 </div>
+                {(profile.nutritionGoal === 'cut' || profile.nutritionGoal === 'bulk') && (
+                  <div className="mt-3 pt-3 border-t border-zinc-700">
+                    <div className="flex gap-2 mb-2">
+                      <button onClick={() => setNutritionIntensity('standard')} className={`flex-1 py-1.5 rounded text-[11px] font-bold uppercase tracking-wide ${(profile.nutritionIntensity || 'standard') === 'standard' ? 'bg-teal-500 text-zinc-900' : 'bg-zinc-800 text-zinc-400 border border-zinc-700'}`}>Standard</button>
+                      <button onClick={() => setNutritionIntensity('aggressive')} className={`flex-1 py-1.5 rounded text-[11px] font-bold uppercase tracking-wide ${profile.nutritionIntensity === 'aggressive' ? 'bg-amber-500 text-zinc-900' : 'bg-zinc-800 text-zinc-400 border border-zinc-700'}`}>{profile.nutritionGoal === 'cut' ? 'Aggressive cut' : 'Aggressive bulk'}</button>
+                    </div>
+                    <p className="text-[11px] text-zinc-400">
+                      {profile.nutritionGoal === 'cut' && profile.nutritionIntensity !== 'aggressive' && `15% below maintenance — about ${Math.abs(macros.lbPerWeek)} lb/week. A moderate deficit that aims to hold onto muscle while losing fat.`}
+                      {profile.nutritionGoal === 'cut' && profile.nutritionIntensity === 'aggressive' && `25% below maintenance, capped at a 2 lb/week loss — about ${Math.abs(macros.lbPerWeek)} lb/week right now. Faster fat loss, but the bigger the deficit, the more likely you are to lose some muscle along with fat and feel flatter in training.`}
+                      {profile.nutritionGoal === 'bulk' && profile.nutritionIntensity !== 'aggressive' && `10% above maintenance — about +${macros.lbPerWeek} lb/week, inside the 5-10% range that tends to favor muscle gain over fat gain.`}
+                      {profile.nutritionGoal === 'bulk' && profile.nutritionIntensity === 'aggressive' && `20% above maintenance — about +${macros.lbPerWeek} lb/week. Faster weight gain, but going past the 5-10% range means more of that gain is likely to be fat rather than muscle.`}
+                    </p>
+                  </div>
+                )}
                 {todayWorkoutCalories > 0 ? (
                   <p className="text-[11px] text-amber-500 mt-2">+{todayWorkoutCalories} kcal added for today's completed training (estimated from bodyweight, volume/RPE, and run distance — mostly flowing into carbs to fuel recovery).</p>
                 ) : (
@@ -3958,6 +4116,39 @@ export default function HybridAthleteApp() {
               {timer.done ? 'Rest done' : `Rest ${Math.floor(timer.secondsLeft / 60)}:${String(timer.secondsLeft % 60).padStart(2, '0')}`}
             </span>
             <button onClick={() => setTimer(null)} className="uppercase text-xs tracking-wide underline">{timer.done ? 'Dismiss' : 'Skip'}</button>
+          </div>
+        )}
+        {pendingImportBundle && (
+          <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-30 px-6">
+            <div className="bg-zinc-800 border border-zinc-700 rounded-lg p-4 max-w-xs w-full">
+              <p className="text-sm font-bold mb-1">Import this backup?</p>
+              <p className="text-xs text-zinc-400 mb-4">This overwrites your current profile, plan, and logged history with the contents of the selected file{pendingImportBundle.exportedAt ? ` (exported ${formatDate(new Date(pendingImportBundle.exportedAt))})` : ''}. It cannot be undone.</p>
+              <div className="flex gap-2">
+                <button onClick={() => setPendingImportBundle(null)} disabled={importing} className="flex-1 py-2 rounded bg-zinc-700 text-xs font-bold uppercase tracking-wide">Cancel</button>
+                <button onClick={confirmImportData} disabled={importing} className="flex-1 py-2 rounded bg-amber-500 text-zinc-900 text-xs font-bold uppercase tracking-wide">{importing ? 'Importing...' : 'Yes, import'}</button>
+              </div>
+            </div>
+          </div>
+        )}
+        {importError && (
+          <div className="fixed bottom-16 inset-x-0 max-w-md mx-auto bg-orange-500 text-zinc-900 px-4 py-2 flex items-center justify-between font-mono text-xs font-bold z-10">
+            <span>{importError}</span>
+            <button onClick={() => setImportError('')} className="uppercase tracking-wide underline shrink-0 ml-2">Dismiss</button>
+          </div>
+        )}
+        {weighInDue && !showProfile && (
+          <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-30 px-6">
+            <div className="bg-zinc-800 border border-zinc-700 rounded-lg p-4 max-w-xs w-full">
+              <p className="text-sm font-bold mb-1">Weekly weigh-in</p>
+              <p className="text-xs text-zinc-400 mb-3">Your calorie and macro targets are based on bodyweight — updating it keeps them accurate. Turn this reminder off anytime in Profile.</p>
+              <div className="flex justify-center bg-zinc-900 border border-zinc-700 rounded mb-3">
+                <WheelPicker value={weighInDraftLb ?? profile.weightLb} onChange={setWeighInDraftLb} options={numRange(70, 400)} />
+              </div>
+              <div className="flex gap-2">
+                <button onClick={skipWeighIn} className="flex-1 py-2 rounded bg-zinc-700 text-xs font-bold uppercase tracking-wide">Skip this week</button>
+                <button onClick={() => recordWeighIn(weighInDraftLb ?? profile.weightLb)} className="flex-1 py-2 rounded bg-teal-500 text-zinc-900 text-xs font-bold uppercase tracking-wide">Save weight</button>
+              </div>
+            </div>
           </div>
         )}
         <nav className="fixed bottom-0 inset-x-0 max-w-md mx-auto bg-zinc-800 border-t border-zinc-700 flex justify-around py-2">
