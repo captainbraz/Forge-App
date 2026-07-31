@@ -27,8 +27,19 @@ const DIST_MILES = { '5k': 3.1069, '2mi': 2, '10k': 6.2137, half: 13.1094, marat
 async function loadKey(key) {
   try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : null; } catch (e) { return null; }
 }
+let lastSaveErrorWasQuota = false;
 async function saveKey(key, value) {
-  try { localStorage.setItem(key, JSON.stringify(value)); return true; } catch (e) { console.error('storage save failed', e); return false; }
+  try { localStorage.setItem(key, JSON.stringify(value)); return true; }
+  catch (e) {
+    lastSaveErrorWasQuota = !!(e && (e.name === 'QuotaExceededError' || e.code === 22 || e.code === 1014));
+    console.error('storage save failed', e);
+    return false;
+  }
+}
+function saveErrorMessage() {
+  return lastSaveErrorWasQuota
+    ? "Couldn't save — your device is out of storage space. Free up space or export your data."
+    : "Couldn't save your last change. Try again — if this keeps happening, export your data as a backup.";
 }
 async function listKeys(prefix) {
   try {
@@ -99,6 +110,29 @@ function parseMinutesInput(val) {
 // The 391-exercise catalog + all fatigue/injury/1RM derivation logic lives in exerciseEngine.js.
 function allCatalogNames() { return exerciseLibrary.map(ex => ex.exercise); }
 function categoryForExerciseName(name) { return libraryExerciseByName(name)?.category || null; }
+// Custom exercises created before the 391-exercise library rewrite were tagged with the old
+// 12-value pattern enum + a bare 'equipment' field instead of category/equipmentTier — without this,
+// they'd silently stop matching any slot (undefined category/tier never equals a real one).
+const OLD_PATTERN_TO_CATEGORY = {
+  squat: 'Leg Exercises', hinge: 'Back Exercises', pushHoriz: 'Chest Exercises', chestFly: 'Chest Exercises',
+  pushVert: 'Shoulder Exercises', pullHoriz: 'Back Exercises', pullVert: 'Back Exercises', rearDelt: 'Shoulder Exercises',
+  core: 'Ab Exercises', legAccessory: 'Leg Exercises', pushAccessory: 'Triceps Exercises', pullAccessory: 'Bicep Exercises'
+};
+function migrateCustomExercises(list) {
+  if (!list || !list.length) return list || [];
+  let changed = false;
+  const migrated = list.map(c => {
+    if (c.category && c.equipmentTier) return c;
+    changed = true;
+    return {
+      name: c.name,
+      category: c.category || OLD_PATTERN_TO_CATEGORY[c.pattern] || 'Chest Exercises',
+      equipmentTier: c.equipmentTier || c.equipment || 'barbell',
+      addedAt: c.addedAt || new Date().toISOString()
+    };
+  });
+  return changed ? migrated : list;
+}
 const DROP_SET_MAP = { Yes: 'last_set', Optional: 'occasionally', No: 'no' };
 // Every library exercise already carries its own sets/rep range and compound flag, so this always
 // resolves (no exerciseSpecs fallback table needed like the old ~90-exercise pool required).
@@ -122,6 +156,16 @@ function nextSetScheme(current) {
   return order[(order.indexOf(current) + 1) % order.length];
 }
 function repsDisplay(repLow, repHigh) { return repLow === repHigh ? `${repLow}` : `${repLow}-${repHigh}`; }
+// Weight/reps fields are free-text inputs (so someone can clear/retype mid-entry) — strip anything
+// that isn't a digit or a single decimal point at write-time, rather than trusting free text all the
+// way through the 1RM/progression math downstream.
+function sanitizeNumericText(raw) {
+  let s = String(raw).replace(/[^0-9.]/g, '');
+  const firstDot = s.indexOf('.');
+  if (firstDot !== -1) s = s.slice(0, firstDot + 1) + s.slice(firstDot + 1).replace(/\./g, '');
+  if (s.length > 6) s = s.slice(0, 6); // guards against pasted absurd values (e.g. 999999999)
+  return s;
+}
 function equivalentReps(targetWeight, targetReps, newWeight) {
   if (!targetWeight || !targetReps || !newWeight) return null;
   const target1RM = targetWeight * (1 + targetReps / 30);
@@ -201,7 +245,7 @@ function weightSourceNote(ex) {
 function setRowLabel(ex, si) {
   const warmupOffset = ex.needsWarmup ? 1 : 0;
   if (warmupOffset && si === 0) return { label: 'Warm-up', color: 'text-teal-400' };
-  if (si < warmupOffset + ex.sets) return { label: `Set ${si - warmupOffset + 1}`, color: 'text-zinc-500' };
+  if (si < warmupOffset + ex.sets) return { label: `Set ${si - warmupOffset + 1}`, color: 'text-zinc-400' };
   return { label: `Drop ${si - warmupOffset - ex.sets + 1}`, color: 'text-amber-500' };
 }
 // Builds one exercise object from a library pick — shared by buildDayExercises and padToTimeBudget
@@ -245,7 +289,9 @@ function buildDayExercises(dayType, seqIndex, { equipment, goal, oneRMs, learned
   });
 }
 function estimateSessionMinutes(exercises) {
-  return exercises.reduce((sum, ex) => sum + ex.sets * (ex.isCompound ? 3.5 : 2), 5);
+  // Working-set time plus the rest between sets — a flat per-set estimate alone badly undercounts
+  // strength-style days (2-3 min rest x 4-5 sets is 10-15 min before the "lifting time" even starts).
+  return exercises.reduce((sum, ex) => sum + ex.sets * ((ex.isCompound ? 3.5 : 2) + parseRestSeconds(ex.rest) / 60), 5);
 }
 function trimToTimeBudget(exercises, targetMinutes) {
   let list = [...exercises];
@@ -1122,6 +1168,32 @@ function SectionHeader({ children, accent }) {
 function Card({ children, className = '' }) {
   return <div className={`bg-zinc-800 rounded-lg p-4 border border-zinc-700 ${className}`}>{children}</div>;
 }
+// Owns its own 1Hz countdown so the per-second tick re-renders only this bar, not the whole app —
+// mount a fresh instance per rest period via `key` (see call site) rather than reusing state across timers.
+const RestTimerBar = React.memo(function RestTimerBar({ total, onDismiss }) {
+  const [secondsLeft, setSecondsLeft] = useState(total);
+  const [done, setDone] = useState(false);
+  useEffect(() => {
+    if (done) return;
+    if (secondsLeft <= 0) {
+      playBeep();
+      if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+      setDone(true);
+      return;
+    }
+    const id = setTimeout(() => setSecondsLeft(s => s - 1), 1000);
+    return () => clearTimeout(id);
+  }, [secondsLeft, done]);
+  return (
+    <div className="fixed bottom-16 inset-x-0 max-w-md mx-auto bg-amber-500 text-zinc-900 px-4 py-2 flex items-center justify-between font-mono text-sm font-bold z-10">
+      <span className="flex items-center gap-2">
+        <Timer size={16} />
+        {done ? 'Rest done' : `Rest ${Math.floor(secondsLeft / 60)}:${String(secondsLeft % 60).padStart(2, '0')}`}
+      </span>
+      <button onClick={onDismiss} className="uppercase text-xs tracking-wide underline">{done ? 'Dismiss' : 'Skip'}</button>
+    </div>
+  );
+});
 function Field({ label, children }) {
   return <label className="text-xs text-zinc-400 block">{label}<div className="mt-1">{children}</div></label>;
 }
@@ -1181,7 +1253,7 @@ function durationLabel(month, year) {
   const y = Math.floor(m / 12), rem = m % 12;
   return rem === 0 ? `${y} yr` : `${y}yr ${rem}mo`;
 }
-function WheelPicker({ value, onChange, options, width = 'flex-1', itemHeight = WHEEL_ITEM_H }) {
+function WheelPicker({ value, onChange, options, width = 'flex-1', itemHeight = WHEEL_ITEM_H, ariaLabel = 'value' }) {
   const ref = useRef(null);
   const settling = useRef(false);
   const height = itemHeight * 3;
@@ -1214,23 +1286,40 @@ function WheelPicker({ value, onChange, options, width = 'flex-1', itemHeight = 
     }
     setTyping(false);
   }
+  function step(delta) {
+    const i = Math.max(0, options.findIndex(o => o.value === value));
+    const next = Math.max(0, Math.min(options.length - 1, i + delta));
+    if (options[next] && options[next].value !== value) onChange(options[next].value);
+  }
+  function handleKeyDown(e) {
+    if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') { e.preventDefault(); step(-1); }
+    else if (e.key === 'ArrowDown' || e.key === 'ArrowRight') { e.preventDefault(); step(1); }
+    else if (e.key === 'Home') { e.preventDefault(); if (options[0]) onChange(options[0].value); }
+    else if (e.key === 'End') { e.preventDefault(); if (options.length) onChange(options[options.length - 1].value); }
+    else if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setTypedValue(String(value)); setTyping(true); }
+  }
   if (typing) {
     return (
       <div className={`relative ${width}`} style={{ height }}>
-        <input autoFocus type="number" inputMode="decimal" value={typedValue} onChange={e => setTypedValue(e.target.value)}
+        <input autoFocus type="number" inputMode="decimal" aria-label={ariaLabel} value={typedValue} onChange={e => setTypedValue(e.target.value)}
           onBlur={commitTyped} onKeyDown={e => { if (e.key === 'Enter') commitTyped(); }}
           className="w-full h-full text-center bg-zinc-900 border border-amber-500 rounded text-stone-100 font-mono text-base" />
       </div>
     );
   }
+  const current = options.find(o => o.value === value);
   return (
     <div className={`relative ${width}`} style={{ height }}>
       <div className="absolute inset-x-0 pointer-events-none border-y border-amber-500/40 bg-amber-500/5 rounded" style={{ top: itemHeight, height: itemHeight }} />
-      <div ref={ref} onScroll={handleScroll} className="wheel-scroll h-full overflow-y-scroll snap-y snap-mandatory relative"
+      <div ref={ref} onScroll={handleScroll} onKeyDown={handleKeyDown}
+        tabIndex={0} role="spinbutton" aria-label={ariaLabel}
+        aria-valuenow={value} aria-valuemin={options[0]?.value} aria-valuemax={options[options.length - 1]?.value}
+        aria-valuetext={current ? current.label : String(value)}
+        className="wheel-scroll h-full overflow-y-scroll snap-y snap-mandatory relative outline-none focus-visible:ring-2 focus-visible:ring-teal-400 rounded"
         style={{ paddingTop: itemHeight, paddingBottom: itemHeight }}>
         {options.map((o, i) => (
           <div key={i} onClick={() => { if (o.value === value) { setTypedValue(String(value)); setTyping(true); } else { onChange(o.value); if (ref.current) ref.current.scrollTop = i * itemHeight; } }}
-            className={`snap-center flex items-center justify-center font-mono cursor-pointer ${o.value === value ? 'text-stone-100 font-bold' : 'text-zinc-600'} ${itemHeight <= 26 ? 'text-xs' : 'text-base'}`}
+            className={`snap-center flex items-center justify-center font-mono cursor-pointer ${o.value === value ? 'text-stone-100 font-bold' : 'text-zinc-500'} ${itemHeight <= 26 ? 'text-xs' : 'text-base'}`}
             style={{ height: itemHeight }}>
             {o.label}
           </div>
@@ -1242,13 +1331,13 @@ function WheelPicker({ value, onChange, options, width = 'flex-1', itemHeight = 
 function DualWheelPicker({ leftLabel, rightLabel, leftOptions, rightOptions, leftValue, rightValue, onLeftChange, onRightChange, itemHeight }) {
   return (
     <div>
-      <div className="flex gap-2 text-[10px] text-zinc-500 uppercase tracking-wide mb-1">
+      <div className="flex gap-2 text-[10px] text-zinc-400 uppercase tracking-wide mb-1">
         <span className="flex-1 text-center">{leftLabel}</span><span className="flex-1 text-center">{rightLabel}</span>
       </div>
       <div className="flex gap-2 bg-zinc-800 border border-zinc-700 rounded">
-        <WheelPicker value={leftValue} onChange={onLeftChange} options={leftOptions} itemHeight={itemHeight} />
+        <WheelPicker value={leftValue} onChange={onLeftChange} options={leftOptions} itemHeight={itemHeight} ariaLabel={leftLabel} />
         <div className="w-px bg-zinc-700" />
-        <WheelPicker value={rightValue} onChange={onRightChange} options={rightOptions} itemHeight={itemHeight} />
+        <WheelPicker value={rightValue} onChange={onRightChange} options={rightOptions} itemHeight={itemHeight} ariaLabel={rightLabel} />
       </div>
     </div>
   );
@@ -1270,7 +1359,7 @@ function ExerciseCombobox({ row, onChange, customExercises, defaultEquipment }) 
       {row.name ? (
         <div className="flex items-center justify-between bg-zinc-800 border border-zinc-700 rounded px-2 py-1.5">
           <span className="text-sm">{row.name}{row.isNew && <span className="text-[10px] text-teal-400 uppercase ml-1.5">new</span>}</span>
-          <button onClick={() => onChange({ ...row, name: null, category: null, isNew: false, query: '' })} className="text-zinc-500"><X size={14} /></button>
+          <button onClick={() => onChange({ ...row, name: null, category: null, isNew: false, query: '' })} aria-label="Clear selected exercise" className="text-zinc-400"><X size={14} /></button>
         </div>
       ) : (
         <div>
@@ -1322,10 +1411,12 @@ export default function HybridAthleteApp() {
   const [libraryQuery, setLibraryQuery] = useState('');
   const [libraryCategory, setLibraryCategory] = useState('all');
   const [libraryScope, setLibraryScope] = useState('all');
+  const [confirmDeleteCustom, setConfirmDeleteCustom] = useState(null);
   const [sessionFocus, setSessionFocus] = useState(null);
   const [timer, setTimer] = useState(null);
   const [suggestions, setSuggestions] = useState({});
   const [saveError, setSaveError] = useState(false);
+  const [staleTabWarning, setStaleTabWarning] = useState(false);
   const [garminError, setGarminError] = useState('');
   const [garminAnalysis, setGarminAnalysis] = useState(null);
   const [liftCompleteMessage, setLiftCompleteMessage] = useState('');
@@ -1412,6 +1503,13 @@ export default function HybridAthleteApp() {
         p = { ...p, lastWeighInDate: todayStr0 };
         await saveKey('profile', p);
       }
+      if (p && p.customExercises && p.customExercises.length) {
+        const migratedCustom = migrateCustomExercises(p.customExercises);
+        if (migratedCustom !== p.customExercises) {
+          p = { ...p, customExercises: migratedCustom };
+          await saveKey('profile', p);
+        }
+      }
       setProfile(p); setCalendar(c); setLiftTemplate(lt);
       if (f) setTodayFood(f);
       if (sugg) setSuggestions(sugg);
@@ -1427,22 +1525,22 @@ export default function HybridAthleteApp() {
     })();
   }, []);
 
+  // Another tab/window wrote to our data — don't silently clobber it on our next save, surface it instead.
+  useEffect(() => {
+    function onStorage(e) {
+      if (!e.key) return;
+      const watched = e.key === 'profile' || e.key === 'calendar' || e.key === 'suggestions' || e.key === 'blockHistory' || e.key.startsWith('log:');
+      if (watched) setStaleTabWarning(true);
+    }
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
+
   useEffect(() => {
     if (loading) return;
     saveKey('uiState', { tab, weekIndex });
   }, [loading, tab, weekIndex]);
 
-  useEffect(() => {
-    if (!timer || timer.done) return;
-    if (timer.secondsLeft <= 0) {
-      playBeep();
-      if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
-      setTimer(t => t ? { ...t, done: true } : null);
-      return;
-    }
-    const id = setTimeout(() => setTimer(t => t ? { ...t, secondsLeft: t.secondsLeft - 1 } : null), 1000);
-    return () => clearTimeout(id);
-  }, [timer]);
 
   async function loadHistory() {
     setHistoryLoading(true);
@@ -1621,9 +1719,10 @@ export default function HybridAthleteApp() {
     });
   }
   function updateSetLocal(exId, setIdx, field, value) {
+    const clean = (field === 'weight' || field === 'reps') ? sanitizeNumericText(value) : value;
     setLogsByDate(prev => {
       const current = prev[expandedDate];
-      const next = { ...current, lift: { ...current.lift, [exId]: { ...current.lift[exId], sets: current.lift[exId].sets.map((s, i) => i === setIdx ? { ...s, [field]: value } : s) } } };
+      const next = { ...current, lift: { ...current.lift, [exId]: { ...current.lift[exId], sets: current.lift[exId].sets.map((s, i) => i === setIdx ? { ...s, [field]: clean } : s) } } };
       return { ...prev, [expandedDate]: next };
     });
   }
@@ -1749,7 +1848,7 @@ export default function HybridAthleteApp() {
     const newSets = exLog.sets.map((s, i) => i === setIdx ? { ...s, done: newDone } : s);
     const nextExLog = { ...exLog, sets: newSets };
     updateDayLog(log => ({ ...log, lift: { ...log.lift, [ex.id]: nextExLog } }));
-    if (newDone) { const secs = parseRestSeconds(ex.rest); setTimer({ secondsLeft: secs, total: secs, done: false }); }
+    if (newDone) { const secs = parseRestSeconds(ex.rest); setTimer({ total: secs, startedAt: Date.now() }); }
     // re-sync the learned weight if this exercise was already rated — a set toggle after RPE entry changes what "best set" means
     if (nextExLog.rpe != null) {
       const learned = computeLearnedOneRM(ex, nextExLog);
@@ -1794,6 +1893,11 @@ export default function HybridAthleteApp() {
   function setNutritionIntensity(intensity) {
     const nextProfile = { ...profile, nutritionIntensity: intensity };
     setProfile(nextProfile); saveKey('profile', nextProfile);
+  }
+  function deleteCustomExercise(name) {
+    const nextProfile = { ...profile, customExercises: (profile.customExercises || []).filter(c => c.name !== name) };
+    setProfile(nextProfile); saveKey('profile', nextProfile);
+    setConfirmDeleteCustom(null);
   }
   function toggleWeeklyWeighIn() {
     const nextProfile = { ...profile, weeklyWeighInEnabled: profile.weeklyWeighInEnabled === false };
@@ -1908,8 +2012,9 @@ export default function HybridAthleteApp() {
     setIndependentLiftDraft(d => ({ ...d, liftExercises: d.liftExercises.filter((_, i) => i !== idx) }));
   }
   function updateIndependentSet(idx, si, field, value) {
+    const clean = (field === 'weight' || field === 'reps') ? sanitizeNumericText(value) : value;
     setIndependentLiftDraft(d => ({
-      ...d, liftExercises: d.liftExercises.map((r, i) => i === idx ? { ...r, sets: r.sets.map((s, j) => j === si ? { ...s, [field]: value } : s) } : r)
+      ...d, liftExercises: d.liftExercises.map((r, i) => i === idx ? { ...r, sets: r.sets.map((s, j) => j === si ? { ...s, [field]: clean } : s) } : r)
     }));
   }
   function addIndependentSet(idx) {
@@ -2405,7 +2510,7 @@ export default function HybridAthleteApp() {
           {conflicts.length === 0 && (
             <Card><p className="text-sm text-zinc-300 mb-3">All set — no flagged conflicts remain.</p></Card>
           )}
-          <button disabled={conflicts.length > 0} onClick={() => finalizePlan(pendingProfile, pendingLiftTemplate, pendingRunTemplate)} className={`w-full mt-4 py-2 rounded text-sm font-bold uppercase tracking-wide ${conflicts.length > 0 ? 'bg-zinc-700 text-zinc-500' : 'bg-teal-500 text-zinc-900'}`}>
+          <button disabled={conflicts.length > 0} onClick={() => finalizePlan(pendingProfile, pendingLiftTemplate, pendingRunTemplate)} className={`w-full mt-4 py-2 rounded text-sm font-bold uppercase tracking-wide ${conflicts.length > 0 ? 'bg-zinc-700 text-zinc-400' : 'bg-teal-500 text-zinc-900'}`}>
             Confirm & build calendar
           </button>
         </div>
@@ -2424,7 +2529,7 @@ export default function HybridAthleteApp() {
           </div>
           <h1 className="text-5xl font-black uppercase tracking-tighter mb-2 bg-gradient-to-r from-amber-500 to-teal-400 bg-clip-text text-transparent">Forge</h1>
           <p className="text-zinc-400 text-sm mb-10">Strength and endurance, built on the same program.</p>
-          <div className="flex items-center gap-3 mb-10 text-[11px] text-zinc-500 uppercase tracking-wide">
+          <div className="flex items-center gap-3 mb-10 text-[11px] text-zinc-400 uppercase tracking-wide">
             <span className="flex items-center gap-1.5"><Dumbbell size={13} className="text-amber-500" />Lift</span>
             <span className="text-zinc-700">+</span>
             <span className="flex items-center gap-1.5"><Activity size={13} className="text-teal-400" />Run</span>
@@ -2432,7 +2537,7 @@ export default function HybridAthleteApp() {
             <span className="flex items-center gap-1.5"><UtensilsCrossed size={13} className="text-stone-300" />Fuel</span>
           </div>
           <button onClick={() => setShowSplash(false)} className="w-full py-3 rounded bg-gradient-to-r from-amber-500 to-teal-400 text-zinc-900 text-sm font-black uppercase tracking-widest">Get Started</button>
-          <button onClick={() => { setImportError(''); importFileRef.current?.click(); }} className="mt-4 text-xs text-zinc-500 underline">Restore from a backup file instead</button>
+          <button onClick={() => { setImportError(''); importFileRef.current?.click(); }} className="mt-4 text-xs text-zinc-400 underline">Restore from a backup file instead</button>
           <input ref={importFileRef} type="file" accept="application/json" onChange={handleImportFileSelected} className="hidden" />
         </div>
         {pendingImportBundle && (
@@ -2471,7 +2576,7 @@ export default function HybridAthleteApp() {
               <div key={s} className={`flex-1 h-1 rounded ${i <= setupStep ? 'bg-amber-500' : 'bg-zinc-700'}`} />
             ))}
           </div>
-          <p className="text-xs uppercase tracking-widest text-zinc-500 mb-4">{setupStep + 1}. {steps[setupStep]}</p>
+          <p className="text-xs uppercase tracking-widest text-zinc-400 mb-4">{setupStep + 1}. {steps[setupStep]}</p>
 
           {setupStep === 0 && (
             <div className="space-y-3">
@@ -2479,21 +2584,21 @@ export default function HybridAthleteApp() {
               <Field label="Sex"><select value={form.sex} onChange={e => setForm({ ...form, sex: e.target.value })} className={inputCls}><option value="male">Male</option><option value="female">Female</option></select></Field>
               <div>
                 <p className="text-xs text-zinc-400 mb-1">Birthday</p>
-                <div className="flex gap-2 text-[10px] text-zinc-500 uppercase tracking-wide mb-1">
+                <div className="flex gap-2 text-[10px] text-zinc-400 uppercase tracking-wide mb-1">
                   <span className="flex-1 text-center">month</span><span className="flex-1 text-center">day</span><span className="flex-1 text-center">year</span>
                 </div>
                 <div className="flex gap-2 bg-zinc-800 border border-zinc-700 rounded">
-                  <WheelPicker value={form.birthday.month} onChange={v => setForm({ ...form, birthday: { ...form.birthday, month: v } })} options={monthOptions()} />
+                  <WheelPicker value={form.birthday.month} onChange={v => setForm({ ...form, birthday: { ...form.birthday, month: v } })} options={monthOptions()} ariaLabel="Birth month" />
                   <div className="w-px bg-zinc-700" />
-                  <WheelPicker value={form.birthday.day} onChange={v => setForm({ ...form, birthday: { ...form.birthday, day: v } })} options={numRange(1, 31)} />
+                  <WheelPicker value={form.birthday.day} onChange={v => setForm({ ...form, birthday: { ...form.birthday, day: v } })} options={numRange(1, 31)} ariaLabel="Birth day" />
                   <div className="w-px bg-zinc-700" />
-                  <WheelPicker value={form.birthday.year} onChange={v => setForm({ ...form, birthday: { ...form.birthday, year: v } })} options={yearOptions(90)} />
+                  <WheelPicker value={form.birthday.year} onChange={v => setForm({ ...form, birthday: { ...form.birthday, year: v } })} options={yearOptions(90)} ariaLabel="Birth year" />
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <p className="text-xs text-zinc-400 mb-1">Weight (lb)</p>
-                  <WheelPicker value={Number(form.weightLb)} onChange={v => setForm({ ...form, weightLb: v })} options={numRange(70, 400)} />
+                  <WheelPicker value={Number(form.weightLb)} onChange={v => setForm({ ...form, weightLb: v })} options={numRange(70, 400)} ariaLabel="Weight in pounds" />
                 </div>
                 <div>
                   <p className="text-xs text-zinc-400 mb-1">Height</p>
@@ -2552,7 +2657,7 @@ export default function HybridAthleteApp() {
 
           {setupStep === 2 && (
             <div className="space-y-3">
-              <p className="text-xs text-zinc-500">Tap each day to assign it.</p>
+              <p className="text-xs text-zinc-400">Tap each day to assign it.</p>
               <div className="space-y-1.5">
                 {WEEKDAYS.map(d => (
                   <div key={d} className="flex items-center justify-between">
@@ -2572,7 +2677,7 @@ export default function HybridAthleteApp() {
                   </Field>
                   <div>
                     <p className="text-xs text-zinc-400 mb-1">Lifting session length (min) — running is separate and sized to the prescribed run</p>
-                    <WheelPicker value={Number(form.sessionLengthMin)} onChange={v => setForm({ ...form, sessionLengthMin: v })} options={numRange(20, 150, 5)} />
+                    <WheelPicker value={Number(form.sessionLengthMin)} onChange={v => setForm({ ...form, sessionLengthMin: v })} options={numRange(20, 150, 5)} ariaLabel="Lifting session length in minutes" />
                   </div>
                   {liftDayCount > 0 && (() => {
                     const sequence = (splitFamilies[form.splitType] || splitFamilies.full_body).sequence;
@@ -2580,7 +2685,7 @@ export default function HybridAthleteApp() {
                     return (
                       <div>
                         <SectionHeader accent="amber">Lift day order</SectionHeader>
-                        <p className="text-xs text-zinc-500 mt-1 mb-2">Assign which split day falls on which weekday — defaults to the split's natural order.</p>
+                        <p className="text-xs text-zinc-400 mt-1 mb-2">Assign which split day falls on which weekday — defaults to the split's natural order.</p>
                         <div className="space-y-1.5">
                           {liftWeekdays.map((d, i) => (
                             <div key={d} className="flex items-center justify-between">
@@ -2599,7 +2704,7 @@ export default function HybridAthleteApp() {
               {includesRunning && runDayCount > 0 && (
                 <div>
                   <SectionHeader accent="teal">Run day types</SectionHeader>
-                  <p className="text-xs text-zinc-500 mt-1 mb-2">Pick which day is your long run and which are quality sessions.</p>
+                  <p className="text-xs text-zinc-400 mt-1 mb-2">Pick which day is your long run and which are quality sessions.</p>
                   <div className="space-y-1.5">
                     {WEEKDAYS.filter(d => form.schedule[d] === 'run' || form.schedule[d] === 'lift_run').map(d => (
                       <div key={d} className="flex items-center justify-between">
@@ -2620,18 +2725,18 @@ export default function HybridAthleteApp() {
               {includesStrength && (
                 <div>
                   <SectionHeader accent="amber">Recent lifts</SectionHeader>
-                  <p className="text-xs text-zinc-500 mb-2">Weight x reps for a recent working set, and roughly when. Leave blank to skip.</p>
+                  <p className="text-xs text-zinc-400 mb-2">Weight x reps for a recent working set, and roughly when. Leave blank to skip.</p>
                   <div className="space-y-2">
                     {['squat', 'bench', 'deadlift', 'ohp'].map(lift => (
                       <Card key={lift}>
                         <p className="text-xs font-bold capitalize mb-2">{lift === 'ohp' ? 'OHP' : lift}</p>
                         <div className="grid grid-cols-2 gap-2">
-                          <input placeholder="lb" value={form.lifts[lift].weight} onChange={e => setForm({ ...form, lifts: { ...form.lifts, [lift]: { ...form.lifts[lift], weight: e.target.value } } })} className={inputCls} />
-                          <input placeholder="reps" value={form.lifts[lift].reps} onChange={e => setForm({ ...form, lifts: { ...form.lifts, [lift]: { ...form.lifts[lift], reps: e.target.value } } })} className={inputCls} />
+                          <input placeholder="lb" value={form.lifts[lift].weight} onChange={e => setForm({ ...form, lifts: { ...form.lifts, [lift]: { ...form.lifts[lift], weight: sanitizeNumericText(e.target.value) } } })} className={inputCls} />
+                          <input placeholder="reps" value={form.lifts[lift].reps} onChange={e => setForm({ ...form, lifts: { ...form.lifts, [lift]: { ...form.lifts[lift], reps: sanitizeNumericText(e.target.value) } } })} className={inputCls} />
                         </div>
                         {form.lifts[lift].weight && (
                           <div className="mt-2">
-                            <p className="text-[11px] text-zinc-500 mb-1">When? {durationLabel(form.lifts[lift].since.month, form.lifts[lift].since.year) && <span className="text-amber-500">· {durationLabel(form.lifts[lift].since.month, form.lifts[lift].since.year)} ago</span>}</p>
+                            <p className="text-[11px] text-zinc-400 mb-1">When? {durationLabel(form.lifts[lift].since.month, form.lifts[lift].since.year) && <span className="text-amber-500">· {durationLabel(form.lifts[lift].since.month, form.lifts[lift].since.year)} ago</span>}</p>
                             <DualWheelPicker
                               leftLabel="month" rightLabel="year"
                               leftOptions={monthOptions()} rightOptions={yearOptions()}
@@ -2654,7 +2759,7 @@ export default function HybridAthleteApp() {
               {includesRunning && (
                 <div>
                   <SectionHeader accent="teal">Recent races + mileage</SectionHeader>
-                  <p className="text-xs text-zinc-500 mt-1 mb-2">Add one or more — more data points make for a better pace estimate.</p>
+                  <p className="text-xs text-zinc-400 mt-1 mb-2">Add one or more — more data points make for a better pace estimate.</p>
                   <div className="space-y-2">
                     {form.recentRaces.map((race, i) => (
                       <Card key={i}>
@@ -2662,12 +2767,12 @@ export default function HybridAthleteApp() {
                           <select value={race.distance} onChange={e => updateRace(i, 'distance', e.target.value)} className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-sm">
                             <option value="5k">5K</option><option value="2mi">2 mi</option><option value="10k">10K</option><option value="half">Half</option><option value="marathon">Marathon</option>
                           </select>
-                          {form.recentRaces.length > 1 && <button onClick={() => removeRace(i)} className="text-zinc-500"><X size={16} /></button>}
+                          {form.recentRaces.length > 1 && <button onClick={() => removeRace(i)} aria-label="Remove this race" className="text-zinc-400"><X size={16} /></button>}
                         </div>
                         <input placeholder="time: 24:30 or 24.5" value={race.minutes} onChange={e => updateRace(i, 'minutes', autoFormatRaceTime(e.target.value))} className={inputCls} />
                         {race.minutes && (
                           <div className="mt-2">
-                            <p className="text-[11px] text-zinc-500 mb-1">When? {durationLabel(race.since.month, race.since.year) && <span className="text-amber-500">· {durationLabel(race.since.month, race.since.year)} ago</span>}</p>
+                            <p className="text-[11px] text-zinc-400 mb-1">When? {durationLabel(race.since.month, race.since.year) && <span className="text-amber-500">· {durationLabel(race.since.month, race.since.year)} ago</span>}</p>
                             <DualWheelPicker
                               leftLabel="month" rightLabel="year"
                               leftOptions={monthOptions()} rightOptions={yearOptions()}
@@ -2689,19 +2794,20 @@ export default function HybridAthleteApp() {
           {setupStep === 4 && (
             <div className="space-y-3">
               <SectionHeader>Injuries</SectionHeader>
-              <p className="text-xs text-zinc-500">Current, recurring, or historic. We'll flag exercises that might aggravate these.</p>
+              <p className="text-xs text-zinc-400">Current, recurring, or historic. We'll flag exercises that might aggravate these.</p>
               {form.injuries.map((inj, i) => (
                 <Card key={i}>
                   <div className="flex justify-between items-start mb-2">
                     <select value={inj.area} onChange={e => updateInjury(i, 'area', e.target.value)} className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-sm">
                       {INJURY_AREAS.map(a => <option key={a} value={a}>{a}</option>)}
                     </select>
-                    <button onClick={() => removeInjury(i)} className="text-zinc-500"><X size={16} /></button>
+                    <button onClick={() => removeInjury(i)} aria-label="Remove this injury" className="text-zinc-400"><X size={16} /></button>
                   </div>
+                  {inj.area === 'Other' && <p className="text-[11px] text-orange-400 mb-2">"Other" isn't matched against specific exercises — we can't auto-flag conflicts for it, so use the notes field and self-monitor for anything that aggravates it.</p>}
                   <select value={inj.status} onChange={e => updateInjury(i, 'status', e.target.value)} className="w-full bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs mb-2">
                     <option value="current">Current</option><option value="recurring">Recurring</option><option value="historic">Historic</option>
                   </select>
-                  <p className="text-[11px] text-zinc-500 mb-1">Since {inj.since && durationLabel(inj.since.month, inj.since.year) && <span className="text-amber-500">· {durationLabel(inj.since.month, inj.since.year)} ago</span>}</p>
+                  <p className="text-[11px] text-zinc-400 mb-1">Since {inj.since && durationLabel(inj.since.month, inj.since.year) && <span className="text-amber-500">· {durationLabel(inj.since.month, inj.since.year)} ago</span>}</p>
                   <DualWheelPicker
                     leftLabel="month" rightLabel="year"
                     leftOptions={monthOptions()} rightOptions={yearOptions()}
@@ -2754,10 +2860,11 @@ export default function HybridAthleteApp() {
                   </select>
                   <button onClick={() => removeProfileInjury(i)} className="text-xs text-teal-400 font-bold uppercase tracking-wide">Healed · remove</button>
                 </div>
+                {inj.area === 'Other' && <p className="text-[11px] text-orange-400 mb-2">"Other" isn't matched against specific exercises — we can't auto-flag conflicts for it, so use the notes field and self-monitor for anything that aggravates it.</p>}
                 <select value={inj.status} onChange={e => updateProfileInjury(i, 'status', e.target.value)} className="w-full bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs mb-2">
                   <option value="current">Current</option><option value="recurring">Recurring</option><option value="historic">Historic</option>
                 </select>
-                <p className="text-[11px] text-zinc-500 mb-1">Since {inj.since && durationLabel(inj.since.month, inj.since.year) && <span className="text-amber-500">· {durationLabel(inj.since.month, inj.since.year)} ago</span>}</p>
+                <p className="text-[11px] text-zinc-400 mb-1">Since {inj.since && durationLabel(inj.since.month, inj.since.year) && <span className="text-amber-500">· {durationLabel(inj.since.month, inj.since.year)} ago</span>}</p>
                 <DualWheelPicker
                   leftLabel="month" rightLabel="year"
                   leftOptions={monthOptions()} rightOptions={yearOptions()}
@@ -2767,7 +2874,7 @@ export default function HybridAthleteApp() {
                 <input placeholder="notes (optional)" value={inj.notes} onChange={e => updateProfileInjury(i, 'notes', e.target.value)} className="w-full bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs mt-2" />
               </Card>
             ))}
-            {(!profile.injuries || profile.injuries.length === 0) && <p className="text-sm text-zinc-500">No injuries logged.</p>}
+            {(!profile.injuries || profile.injuries.length === 0) && <p className="text-sm text-zinc-400">No injuries logged.</p>}
             <button onClick={addProfileInjury} className="w-full py-1.5 rounded border border-zinc-700 text-xs font-bold uppercase tracking-wide flex items-center justify-center gap-1"><Plus size={12} />Add injury</button>
           </div>
         </div>
@@ -2803,17 +2910,17 @@ export default function HybridAthleteApp() {
                   <div>
                     <p className="text-xs text-zinc-400 mb-1">Birthday</p>
                     <div className="flex gap-2 bg-zinc-800 border border-zinc-700 rounded">
-                      <WheelPicker value={profileDraft.birthday.month} onChange={v => setProfileDraft({ ...profileDraft, birthday: { ...profileDraft.birthday, month: v } })} options={monthOptions()} />
+                      <WheelPicker value={profileDraft.birthday.month} onChange={v => setProfileDraft({ ...profileDraft, birthday: { ...profileDraft.birthday, month: v } })} options={monthOptions()} ariaLabel="Birth month" />
                       <div className="w-px bg-zinc-700" />
-                      <WheelPicker value={profileDraft.birthday.day} onChange={v => setProfileDraft({ ...profileDraft, birthday: { ...profileDraft.birthday, day: v } })} options={numRange(1, 31)} />
+                      <WheelPicker value={profileDraft.birthday.day} onChange={v => setProfileDraft({ ...profileDraft, birthday: { ...profileDraft.birthday, day: v } })} options={numRange(1, 31)} ariaLabel="Birth day" />
                       <div className="w-px bg-zinc-700" />
-                      <WheelPicker value={profileDraft.birthday.year} onChange={v => setProfileDraft({ ...profileDraft, birthday: { ...profileDraft.birthday, year: v } })} options={yearOptions(90)} />
+                      <WheelPicker value={profileDraft.birthday.year} onChange={v => setProfileDraft({ ...profileDraft, birthday: { ...profileDraft.birthday, year: v } })} options={yearOptions(90)} ariaLabel="Birth year" />
                     </div>
                   </div>
                   <div className="grid grid-cols-2 gap-3">
                     <div>
                       <p className="text-xs text-zinc-400 mb-1">Weight (lb)</p>
-                      <WheelPicker value={Number(profileDraft.weightLb)} onChange={v => setProfileDraft({ ...profileDraft, weightLb: v })} options={numRange(70, 400)} />
+                      <WheelPicker value={Number(profileDraft.weightLb)} onChange={v => setProfileDraft({ ...profileDraft, weightLb: v })} options={numRange(70, 400)} ariaLabel="Weight in pounds" />
                     </div>
                     <div>
                       <p className="text-xs text-zinc-400 mb-1">Height</p>
@@ -2843,11 +2950,11 @@ export default function HybridAthleteApp() {
                 </div>
               ) : (
                 <div className="grid grid-cols-2 gap-y-1.5 mt-2 text-sm">
-                  {profile.name && <div className="col-span-2"><span className="text-zinc-500">Name</span> · {profile.name}</div>}
-                  <div><span className="text-zinc-500">Age</span> · {currentAge != null ? currentAge : '—'}</div>
-                  <div><span className="text-zinc-500">Weight</span> · {profile.weightLb} lb</div>
-                  <div><span className="text-zinc-500">Height</span> · {Math.floor(profile.heightIn / 12)}'{profile.heightIn % 12}"</div>
-                  <div><span className="text-zinc-500">Activity</span> · {ACTIVITY_LABELS[profile.activityLevel] || profile.activityLevel}</div>
+                  {profile.name && <div className="col-span-2"><span className="text-zinc-400">Name</span> · {profile.name}</div>}
+                  <div><span className="text-zinc-400">Age</span> · {currentAge != null ? currentAge : '—'}</div>
+                  <div><span className="text-zinc-400">Weight</span> · {profile.weightLb} lb</div>
+                  <div><span className="text-zinc-400">Height</span> · {Math.floor(profile.heightIn / 12)}'{profile.heightIn % 12}"</div>
+                  <div><span className="text-zinc-400">Activity</span> · {ACTIVITY_LABELS[profile.activityLevel] || profile.activityLevel}</div>
                 </div>
               )}
             </Card>
@@ -2855,7 +2962,7 @@ export default function HybridAthleteApp() {
               <div className="flex items-center justify-between">
                 <div>
                   <SectionHeader>Weekly weigh-in reminder</SectionHeader>
-                  <p className="text-[11px] text-zinc-500 mt-1">Prompts you to update your weight every 7 days so calorie targets stay accurate.</p>
+                  <p className="text-[11px] text-zinc-400 mt-1">Prompts you to update your weight every 7 days so calorie targets stay accurate.</p>
                 </div>
                 <button onClick={toggleWeeklyWeighIn} className={`shrink-0 text-[11px] font-bold uppercase tracking-wide px-3 py-1.5 rounded ${profile.weeklyWeighInEnabled !== false ? 'bg-teal-500 text-zinc-900' : 'bg-zinc-800 text-zinc-400 border border-zinc-700'}`}>
                   {profile.weeklyWeighInEnabled !== false ? 'On' : 'Off'}
@@ -2868,11 +2975,11 @@ export default function HybridAthleteApp() {
                 {liftRecords.map(r => (
                   <div key={r.label}>
                     <div className="text-lg font-bold">{r.value || '—'}</div>
-                    <div className="text-[10px] text-zinc-500 uppercase">{r.label}</div>
+                    <div className="text-[10px] text-zinc-400 uppercase">{r.label}</div>
                   </div>
                 ))}
               </div>
-              <p className="text-[10px] text-zinc-600 mt-2">Updates automatically as you log those lifts.</p>
+              <p className="text-[10px] text-zinc-500 mt-2">Updates automatically as you log those lifts.</p>
             </Card>
             {profile.vdot && (
               <Card>
@@ -2880,36 +2987,36 @@ export default function HybridAthleteApp() {
                 <div className="flex items-center justify-between mt-2">
                   <div>
                     <div className="text-2xl font-bold font-mono text-teal-400">{profile.vdot.toFixed(1)}</div>
-                    <div className="text-[10px] text-zinc-500 uppercase">Estimated VO2 Max</div>
+                    <div className="text-[10px] text-zinc-400 uppercase">Estimated VO2 Max</div>
                   </div>
                   <div className="text-sm font-bold text-stone-300 uppercase tracking-wide">{vo2MaxCategory(profile.vdot)}</div>
                 </div>
-                <p className="text-[10px] text-zinc-600 mt-2">Estimated from your best entered race time. Roughly: &lt;30 beginner, 30-39 recreational, 40-49 trained, 50-59 competitive, 60+ elite.</p>
+                <p className="text-[10px] text-zinc-500 mt-2">Estimated from your best entered race time. Roughly: &lt;30 beginner, 30-39 recreational, 40-49 trained, 50-59 competitive, 60+ elite.</p>
               </Card>
             )}
             <Card>
               <SectionHeader accent="teal">Training Setup</SectionHeader>
               <div className="space-y-1.5 mt-2 text-sm">
-                <div><span className="text-zinc-500">Mode</span> · <span className="capitalize">{profile.trainingMode}</span></div>
+                <div><span className="text-zinc-400">Mode</span> · <span className="capitalize">{profile.trainingMode}</span></div>
                 {profile.strengthGoal && (
                   <div>
-                    <span className="text-zinc-500">Strength goal</span> · <span className="capitalize">{profile.strengthGoal}</span>
-                    <p className="text-[11px] text-zinc-500 mt-0.5">Sets which rep ranges and set counts get picked, whether main lifts use reverse pyramid loading, and the load/volume note on each workout.</p>
+                    <span className="text-zinc-400">Strength goal</span> · <span className="capitalize">{profile.strengthGoal}</span>
+                    <p className="text-[11px] text-zinc-400 mt-0.5">Sets which rep ranges and set counts get picked, whether main lifts use reverse pyramid loading, and the load/volume note on each workout.</p>
                   </div>
                 )}
-                {profile.runGoal && <div><span className="text-zinc-500">Run goal</span> · {RUN_GOAL_LABELS[profile.runGoal] || profile.runGoal}</div>}
-                <div><span className="text-zinc-500">Experience</span> · <span className="capitalize">{profile.experience}</span></div>
-                <div><span className="text-zinc-500">Equipment</span> · <span className="capitalize">{profile.equipment}</span></div>
-                {profile.splitType && <div><span className="text-zinc-500">Split</span> · {splitFamilies[profile.splitType]?.label}</div>}
-                {profile.sessionLengthMin && <div><span className="text-zinc-500">Session length</span> · {profile.sessionLengthMin} min</div>}
-                {profile.currentWeeklyMileage != null && <div><span className="text-zinc-500">Weekly mileage</span> · {profile.currentWeeklyMileage} mi</div>}
-                <div><span className="text-zinc-500">Nutrition goal</span> · <span className="capitalize">{profile.nutritionGoal}</span></div>
+                {profile.runGoal && <div><span className="text-zinc-400">Run goal</span> · {RUN_GOAL_LABELS[profile.runGoal] || profile.runGoal}</div>}
+                <div><span className="text-zinc-400">Experience</span> · <span className="capitalize">{profile.experience}</span></div>
+                <div><span className="text-zinc-400">Equipment</span> · <span className="capitalize">{profile.equipment}</span></div>
+                {profile.splitType && <div><span className="text-zinc-400">Split</span> · {splitFamilies[profile.splitType]?.label}</div>}
+                {profile.sessionLengthMin && <div><span className="text-zinc-400">Session length</span> · {profile.sessionLengthMin} min</div>}
+                {profile.currentWeeklyMileage != null && <div><span className="text-zinc-400">Weekly mileage</span> · {profile.currentWeeklyMileage} mi</div>}
+                <div><span className="text-zinc-400">Nutrition goal</span> · <span className="capitalize">{profile.nutritionGoal}</span></div>
               </div>
             </Card>
             <Card>
               <SectionHeader>Schedule</SectionHeader>
               <div className="mt-2 space-y-1 text-sm text-zinc-300">
-                {scheduleSummary.length ? scheduleSummary.map(s => <div key={s}>{s}</div>) : <p className="text-zinc-500">No training days set.</p>}
+                {scheduleSummary.length ? scheduleSummary.map(s => <div key={s}>{s}</div>) : <p className="text-zinc-400">No training days set.</p>}
               </div>
             </Card>
           </div>
@@ -2941,7 +3048,7 @@ export default function HybridAthleteApp() {
           <div className="flex items-center justify-between mb-1">
             <h1 className="text-lg font-black uppercase tracking-widest">Edit training setup</h1>
           </div>
-          <p className="text-xs text-zinc-500 mb-4">Changes only affect today onward — anything already logged stays exactly as it was.</p>
+          <p className="text-xs text-zinc-400 mb-4">Changes only affect today onward — anything already logged stays exactly as it was.</p>
           <div className="space-y-3">
             {includesStrengthEdit && (
               <Card>
@@ -2964,7 +3071,7 @@ export default function HybridAthleteApp() {
                   </Field>
                   <div>
                     <p className="text-xs text-zinc-400 mb-1">Lifting session length (min)</p>
-                    <WheelPicker value={Number(trainingSetupDraft.sessionLengthMin)} onChange={v => setTrainingSetupDraft({ ...trainingSetupDraft, sessionLengthMin: v })} options={numRange(20, 150, 5)} />
+                    <WheelPicker value={Number(trainingSetupDraft.sessionLengthMin)} onChange={v => setTrainingSetupDraft({ ...trainingSetupDraft, sessionLengthMin: v })} options={numRange(20, 150, 5)} ariaLabel="Lifting session length in minutes" />
                   </div>
                 </div>
               </Card>
@@ -2984,7 +3091,7 @@ export default function HybridAthleteApp() {
             )}
             <Card>
               <SectionHeader>Schedule</SectionHeader>
-              <p className="text-xs text-zinc-500 mt-1 mb-2">Tap each day to reassign it.</p>
+              <p className="text-xs text-zinc-400 mt-1 mb-2">Tap each day to reassign it.</p>
               <div className="space-y-1.5">
                 {WEEKDAYS.map(d => (
                   <div key={d} className="flex items-center justify-between">
@@ -2999,7 +3106,7 @@ export default function HybridAthleteApp() {
             {includesStrengthEdit && draftLiftDayCount > 0 && (
               <Card>
                 <SectionHeader accent="amber">Lift day order</SectionHeader>
-                <p className="text-xs text-zinc-500 mt-1 mb-2">Assign which split day falls on which weekday.</p>
+                <p className="text-xs text-zinc-400 mt-1 mb-2">Assign which split day falls on which weekday.</p>
                 <div className="space-y-1.5">
                   {draftLiftWeekdays.map((d, i) => (
                     <div key={d} className="flex items-center justify-between">
@@ -3049,7 +3156,7 @@ export default function HybridAthleteApp() {
             <button onClick={() => startNewPlan('recent')} className="w-full py-2.5 rounded bg-amber-500 text-zinc-900 text-sm font-bold uppercase tracking-wide">Reseed from my last 30 days</button>
             <button onClick={() => setShowStartNewPlan(false)} className="w-full py-2.5 rounded bg-zinc-800 border border-zinc-700 text-sm font-bold uppercase tracking-wide">Cancel</button>
           </div>
-          <p className="text-[10px] text-zinc-600 mt-3">Either way, your name, age, height, weight, and custom exercises carry over — you'll review everything again in setup before it's final.</p>
+          <p className="text-[10px] text-zinc-500 mt-3">Either way, your name, age, height, weight, and custom exercises carry over — you'll review everything again in setup before it's final.</p>
         </div>
       </div>
     );
@@ -3064,18 +3171,18 @@ export default function HybridAthleteApp() {
             <button onClick={() => setShowBlockHistory(false)} className="text-sm font-bold text-teal-400 uppercase tracking-wide">Done</button>
           </div>
           {blockHistory.length === 0 ? (
-            <p className="text-sm text-zinc-500">No finished blocks yet — this fills in once you complete or replace a 4-week plan.</p>
+            <p className="text-sm text-zinc-400">No finished blocks yet — this fills in once you complete or replace a 4-week plan.</p>
           ) : (
             <div className="space-y-2">
               {[...blockHistory].reverse().map((b, i) => (
                 <Card key={i}>
                   <p className="text-sm font-bold">{b.startDate} → {b.endDate}</p>
-                  <p className="text-xs text-zinc-500 capitalize mt-0.5">{splitFamilies[b.splitType]?.label || b.splitType} · {b.trainingMode}</p>
+                  <p className="text-xs text-zinc-400 capitalize mt-0.5">{splitFamilies[b.splitType]?.label || b.splitType} · {b.trainingMode}</p>
                 </Card>
               ))}
             </div>
           )}
-          <p className="text-[11px] text-zinc-600 mt-4">This is a record of the plan structure for each finished block. Your actual logged workouts aren't tied to a block — they're always visible in Stats regardless of which block they happened in.</p>
+          <p className="text-[11px] text-zinc-500 mt-4">This is a record of the plan structure for each finished block. Your actual logged workouts aren't tied to a block — they're always visible in Stats regardless of which block they happened in.</p>
         </div>
       </div>
     );
@@ -3089,7 +3196,7 @@ export default function HybridAthleteApp() {
             <h1 className="text-lg font-black uppercase tracking-widest">RPE guide</h1>
             <button onClick={() => setShowRpeGuide(false)} className="text-sm font-bold text-teal-400 uppercase tracking-wide">Done</button>
           </div>
-          <p className="text-xs text-zinc-500 mb-3">RPE (Rate of Perceived Exertion) is how hard a set felt, on a 1-10 scale — not the weight, the effort.</p>
+          <p className="text-xs text-zinc-400 mb-3">RPE (Rate of Perceived Exertion) is how hard a set felt, on a 1-10 scale — not the weight, the effort.</p>
           <div className="space-y-2">
             {Array.from({ length: 10 }, (_, i) => 10 - i).map(n => (
               <Card key={n}>
@@ -3130,16 +3237,19 @@ export default function HybridAthleteApp() {
             <option value="all">All categories</option>
             {CATEGORIES.map(cat => <option key={cat} value={cat}>{cat.replace(' Exercises', '')}</option>)}
           </select>
-          <p className="text-[11px] text-zinc-500 mb-2">{filtered.length} exercise{filtered.length === 1 ? '' : 's'}</p>
+          <p className="text-[11px] text-zinc-400 mb-2">{filtered.length} exercise{filtered.length === 1 ? '' : 's'}</p>
           <div className="space-y-1.5">
-            {filtered.length === 0 && <p className="text-sm text-zinc-500">No exercises match.</p>}
+            {filtered.length === 0 && <p className="text-sm text-zinc-400">No exercises match.</p>}
             {libraryScope === 'custom' ? filtered.map(ex => (
               <Card key={`${ex.category}-${ex.name}`}>
                 <div className="flex items-center justify-between gap-2">
                   <p className="text-sm font-bold truncate">{ex.name}</p>
-                  <span className="text-[10px] text-teal-400 uppercase shrink-0">custom</span>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span className="text-[10px] text-teal-400 uppercase">custom</span>
+                    <button onClick={() => setConfirmDeleteCustom(ex.name)} aria-label={`Delete ${ex.name}`} className="text-zinc-400"><X size={14} /></button>
+                  </div>
                 </div>
-                <p className="text-[11px] text-zinc-500 mt-0.5">{(ex.category || '').replace(' Exercises', '')} · {EQUIPMENT_TIER_LABELS[ex.equipmentTier] || ex.equipmentTier}</p>
+                <p className="text-[11px] text-zinc-400 mt-0.5">{(ex.category || '').replace(' Exercises', '')} · {EQUIPMENT_TIER_LABELS[ex.equipmentTier] || ex.equipmentTier}</p>
               </Card>
             )) : filtered.map(ex => (
               <Card key={`${ex.category}-${ex.exercise}`}>
@@ -3147,12 +3257,24 @@ export default function HybridAthleteApp() {
                   <p className="text-sm font-bold truncate">{ex.exercise}</p>
                   {ex.isCompound && <span className="text-[10px] text-amber-400 uppercase shrink-0">compound</span>}
                 </div>
-                <p className="text-[11px] text-zinc-500 mt-0.5">{ex.category.replace(' Exercises', '')} · {ex.primaryMuscle}</p>
-                <p className="text-[10px] text-zinc-600 mt-0.5">{ex.equipment} · Fatigue: {ex.fatigueCost} · {ex.sets} sets x {ex.reps}</p>
+                <p className="text-[11px] text-zinc-400 mt-0.5">{ex.category.replace(' Exercises', '')} · {ex.primaryMuscle}</p>
+                <p className="text-[10px] text-zinc-500 mt-0.5">{ex.equipment} · Fatigue: {ex.fatigueCost} · {ex.sets} sets x {ex.reps}</p>
               </Card>
             ))}
           </div>
         </div>
+        {confirmDeleteCustom && (
+          <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-30 px-6">
+            <div className="bg-zinc-800 border border-zinc-700 rounded-lg p-4 max-w-xs w-full">
+              <p className="text-sm font-bold mb-1">Delete "{confirmDeleteCustom}"?</p>
+              <p className="text-xs text-zinc-400 mb-4">It won't be suggested in future plans. Past logged workouts that already reference it keep their history untouched.</p>
+              <div className="flex gap-2">
+                <button onClick={() => setConfirmDeleteCustom(null)} className="flex-1 py-2 rounded bg-zinc-700 text-xs font-bold uppercase tracking-wide">Cancel</button>
+                <button onClick={() => deleteCustomExercise(confirmDeleteCustom)} className="flex-1 py-2 rounded bg-orange-500 text-zinc-900 text-xs font-bold uppercase tracking-wide">Delete</button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -3188,16 +3310,16 @@ export default function HybridAthleteApp() {
             <h1 className="text-lg font-black uppercase tracking-widest">Feedback & ideas</h1>
             <button onClick={() => setShowFeedback(false)} className="text-sm font-bold text-teal-400 uppercase tracking-wide">Done</button>
           </div>
-          <p className="text-xs text-zinc-500 mb-3">A running list of bugs, ideas, and things to revisit — kept on this device alongside the rest of your data (included in "Export my data"). Tap the mail icon on an entry to actually send it — nothing leaves this device on its own.</p>
+          <p className="text-xs text-zinc-400 mb-3">A running list of bugs, ideas, and things to revisit — kept on this device alongside the rest of your data (included in "Export my data"). Tap the mail icon on an entry to actually send it — nothing leaves this device on its own.</p>
           <div className="space-y-2 mb-4">
             <textarea value={feedbackDraft} onChange={e => setFeedbackDraft(e.target.value)} placeholder="Found something off, or have an idea?" rows={3} className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-2 text-sm text-stone-100" />
             <div className="flex gap-2">
               <button onClick={saveFeedbackEntry} className="flex-1 py-2 rounded bg-zinc-800 border border-zinc-700 text-sm font-bold uppercase tracking-wide">Save here</button>
-              <a href={feedbackDraft.trim() ? feedbackMailtoHref(feedbackDraft.trim(), dateKey(new Date())) : undefined} onClick={e => { if (!feedbackDraft.trim()) { e.preventDefault(); return; } saveFeedbackEntry(); }} className={`flex-1 py-2 rounded text-sm font-bold uppercase tracking-wide text-center flex items-center justify-center gap-1.5 ${feedbackDraft.trim() ? 'bg-teal-500 text-zinc-900' : 'bg-zinc-800 text-zinc-600 border border-zinc-700 pointer-events-none'}`}><Mail size={14} />Send</a>
+              <a href={feedbackDraft.trim() ? feedbackMailtoHref(feedbackDraft.trim(), dateKey(new Date())) : undefined} onClick={e => { if (!feedbackDraft.trim()) { e.preventDefault(); return; } saveFeedbackEntry(); }} className={`flex-1 py-2 rounded text-sm font-bold uppercase tracking-wide text-center flex items-center justify-center gap-1.5 ${feedbackDraft.trim() ? 'bg-teal-500 text-zinc-900' : 'bg-zinc-800 text-zinc-500 border border-zinc-700 pointer-events-none'}`}><Mail size={14} />Send</a>
             </div>
           </div>
           {feedbackList.length === 0 ? (
-            <p className="text-sm text-zinc-500">Nothing logged yet.</p>
+            <p className="text-sm text-zinc-400">Nothing logged yet.</p>
           ) : (
             <div className="space-y-2">
               {[...feedbackList].reverse().map(f => (
@@ -3205,9 +3327,9 @@ export default function HybridAthleteApp() {
                   <div className="flex items-start justify-between gap-2">
                     <p className="text-sm text-zinc-200 flex-1">{f.text}</p>
                     <a href={feedbackMailtoHref(f.text, f.date)} className="text-teal-400 shrink-0" title="Send this to the developer"><Mail size={14} /></a>
-                    <button onClick={() => deleteFeedbackEntry(f.id)} className="text-zinc-600 shrink-0"><X size={14} /></button>
+                    <button onClick={() => deleteFeedbackEntry(f.id)} aria-label="Delete this feedback entry" className="text-zinc-500 shrink-0"><X size={14} /></button>
                   </div>
-                  <p className="text-[10px] text-zinc-600 mt-1">{f.date}</p>
+                  <p className="text-[10px] text-zinc-500 mt-1">{f.date}</p>
                 </Card>
               ))}
             </div>
@@ -3226,12 +3348,12 @@ export default function HybridAthleteApp() {
         <header className="px-4 pt-5 pb-3 flex items-center justify-between">
           <div>
             <h1 className="text-lg font-black uppercase tracking-widest bg-gradient-to-r from-amber-500 to-teal-400 bg-clip-text text-transparent">Forge</h1>
-            <p className="text-[11px] text-zinc-500 font-mono">{formatDate(new Date())}</p>
+            <p className="text-[11px] text-zinc-400 font-mono">{formatDate(new Date())}</p>
           </div>
           <div className="flex items-center gap-3">
-            <button onClick={() => setShowProfile(true)} className="text-zinc-500"><User size={18} /></button>
+            <button onClick={() => setShowProfile(true)} aria-label="Open profile" className="text-zinc-400"><User size={18} /></button>
             <div className="relative">
-              <button onClick={() => setShowSettingsMenu(!showSettingsMenu)} className="text-zinc-500"><Settings size={18} /></button>
+              <button onClick={() => setShowSettingsMenu(!showSettingsMenu)} aria-label="Open settings menu" aria-expanded={showSettingsMenu} className="text-zinc-400"><Settings size={18} /></button>
             {showSettingsMenu && (
               <div className="absolute right-0 top-8 z-20 w-48 bg-zinc-800 border border-zinc-700 rounded-lg shadow-xl overflow-hidden">
                 <button onClick={() => { setShowSettingsMenu(false); setShowInjuryManager(true); }} className="w-full text-left px-3 py-2.5 text-sm hover:bg-zinc-700">Manage injuries</button>
@@ -3266,13 +3388,13 @@ export default function HybridAthleteApp() {
                           {l.strength > 0 && <div className="w-full bg-amber-500" style={{ height: `${(l.strength / maxLoad) * 100}%` }} />}
                           {l.running > 0 && <div className="w-full bg-teal-400" style={{ height: `${(l.running / maxLoad) * 100}%` }} />}
                         </div>
-                        <span className="text-[10px] text-zinc-500 mt-1 font-mono">{d}</span>
+                        <span className="text-[10px] text-zinc-400 mt-1 font-mono">{d}</span>
                         {(total >= 5 || l.hardDay) && <Flame size={10} className="text-orange-500 -mt-0.5" />}
                       </div>
                     );
                   })}
                 </div>
-                <div className="flex gap-4 mt-2 text-[11px] text-zinc-500">
+                <div className="flex gap-4 mt-2 text-[11px] text-zinc-400">
                   <span className="flex items-center gap-1"><span className="w-2 h-2 bg-amber-500 rounded-sm inline-block" /> Strength</span>
                   <span className="flex items-center gap-1"><span className="w-2 h-2 bg-teal-400 rounded-sm inline-block" /> Running</span>
                 </div>
@@ -3284,13 +3406,13 @@ export default function HybridAthleteApp() {
                   {todayEntry?.lift && (
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2"><Dumbbell size={16} className="text-amber-500" /><span className="text-sm">{todayEntry.lift.dayType}</span></div>
-                      <button onClick={() => { setTab('calendar'); setWeekIndex(currentWeekIdx); toggleDay(todayEntry); }} className="text-zinc-500"><ChevronRight size={16} /></button>
+                      <button onClick={() => { setTab('calendar'); setWeekIndex(currentWeekIdx); toggleDay(todayEntry); }} aria-label="View today's lift in the plan" className="text-zinc-400"><ChevronRight size={16} /></button>
                     </div>
                   )}
                   {todayEntry?.run && (
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2"><Activity size={16} className="text-teal-400" /><span className="text-sm">{todayEntry.run.type} run</span></div>
-                      <button onClick={() => { setTab('calendar'); setWeekIndex(currentWeekIdx); toggleDay(todayEntry); }} className="text-zinc-500"><ChevronRight size={16} /></button>
+                      <button onClick={() => { setTab('calendar'); setWeekIndex(currentWeekIdx); toggleDay(todayEntry); }} aria-label="View today's run in the plan" className="text-zinc-400"><ChevronRight size={16} /></button>
                     </div>
                   )}
                   {todayEntry && !todayEntry.lift && !todayEntry.run && (
@@ -3304,7 +3426,7 @@ export default function HybridAthleteApp() {
                   <SectionHeader>Fuel today</SectionHeader>
                   <div className="mt-2 flex justify-between text-sm">
                     <span className="font-mono">{foodTotals.kcal} / {macros.targetCals} kcal</span>
-                    <button onClick={() => setTab('fuel')} className="text-zinc-500"><ChevronRight size={16} /></button>
+                    <button onClick={() => setTab('fuel')} aria-label="View fuel details" className="text-zinc-400"><ChevronRight size={16} /></button>
                   </div>
                 </Card>
               )}
@@ -3314,12 +3436,12 @@ export default function HybridAthleteApp() {
           {tab === 'calendar' && (
             <>
               <div className="flex items-center justify-between">
-                <button disabled={weekIndex === 0} onClick={() => setWeekIndex(weekIndex - 1)} className={weekIndex === 0 ? 'text-zinc-700' : 'text-zinc-300'}><ChevronLeft size={20} /></button>
+                <button disabled={weekIndex === 0} onClick={() => setWeekIndex(weekIndex - 1)} aria-label="Previous week" className={weekIndex === 0 ? 'text-zinc-700' : 'text-zinc-300'}><ChevronLeft size={20} /></button>
                 <div className="text-center">
                   <p className="text-sm font-bold">Week {weekIndex + 1} of 4 {week.deload && <span className="text-orange-400">· Deload</span>}</p>
-                  <p className="text-[11px] text-zinc-500 font-mono">from {week.monday}</p>
+                  <p className="text-[11px] text-zinc-400 font-mono">from {week.monday}</p>
                 </div>
-                <button disabled={weekIndex === 3} onClick={() => setWeekIndex(weekIndex + 1)} className={weekIndex === 3 ? 'text-zinc-700' : 'text-zinc-300'}><ChevronRight size={20} /></button>
+                <button disabled={weekIndex === 3} onClick={() => setWeekIndex(weekIndex + 1)} aria-label="Next week" className={weekIndex === 3 ? 'text-zinc-700' : 'text-zinc-300'}><ChevronRight size={20} /></button>
               </div>
               {WEEKDAYS.map(d => {
                 const entry = week.days[d];
@@ -3337,11 +3459,11 @@ export default function HybridAthleteApp() {
                           <div key={exLog.id} className="text-sm" style={exLog.supersetGroup ? { borderLeft: `3px solid ${SUPERSET_COLORS[exLog.supersetGroup]}`, paddingLeft: 6 } : undefined}>
                             <div className="flex items-center justify-between gap-2">
                               <span className="flex-1">{exLog.supersetGroup ? `[${exLog.supersetGroup}] ` : ''}{exLog.name}</span>
-                              {exLog.rpe != null && <span className="text-[10px] text-zinc-500 shrink-0">RPE {exLog.rpe}</span>}
+                              {exLog.rpe != null && <span className="text-[10px] text-zinc-400 shrink-0">RPE {exLog.rpe}</span>}
                               <button onClick={() => editIndependentLift(entry.date, exLog.id)} className="text-[10px] text-teal-400 font-bold uppercase shrink-0">Edit</button>
-                              <button onClick={() => deleteIndependentLift(entry.date, exLog.id)} className="text-zinc-600 shrink-0"><X size={12} /></button>
+                              <button onClick={() => deleteIndependentLift(entry.date, exLog.id)} aria-label="Delete this logged lift" className="text-zinc-500 shrink-0"><X size={12} /></button>
                             </div>
-                            <p className="text-[11px] text-zinc-500 font-mono">{exLog.sets.map(s => `${s.type && s.type !== 'working' ? SET_TYPE_LABELS[s.type] + ' ' : ''}${s.weight}x${s.reps}`).join(', ')}</p>
+                            <p className="text-[11px] text-zinc-400 font-mono">{exLog.sets.map(s => `${s.type && s.type !== 'working' ? SET_TYPE_LABELS[s.type] + ' ' : ''}${s.weight}x${s.reps}`).join(', ')}</p>
                           </div>
                         ))}
                       </div>
@@ -3363,10 +3485,10 @@ export default function HybridAthleteApp() {
                                   <div className="flex-1">
                                     <ExerciseCombobox row={row} onChange={next => updateIndependentExerciseRow(idx, next)} customExercises={profile.customExercises} defaultEquipment={profile.equipment} />
                                   </div>
-                                  <button onClick={() => removeIndependentExerciseRow(idx)} className="text-zinc-500 mt-2"><X size={14} /></button>
+                                  <button onClick={() => removeIndependentExerciseRow(idx)} aria-label="Remove this exercise" className="text-zinc-400 mt-2"><X size={14} /></button>
                                 </div>
                                 <div className="flex items-center gap-1.5">
-                                  <span className="text-[10px] text-zinc-500">Superset</span>
+                                  <span className="text-[10px] text-zinc-400">Superset</span>
                                   <select value={row.supersetGroup || ''} onChange={e => updateIndependentExerciseRow(idx, { ...row, supersetGroup: e.target.value || null })} className="bg-zinc-900 border border-zinc-700 rounded px-1.5 py-1 text-[10px]">
                                     <option value="">None</option>
                                     {['A', 'B', 'C', 'D'].map(g => <option key={g} value={g}>Group {g}</option>)}
@@ -3379,18 +3501,18 @@ export default function HybridAthleteApp() {
                                     </select>
                                     <input placeholder="lb" value={s.weight} onChange={e => updateIndependentSet(idx, si, 'weight', e.target.value)} className="w-16 bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs" />
                                     <input placeholder="reps" value={s.reps} onChange={e => updateIndependentSet(idx, si, 'reps', e.target.value)} className="w-14 bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs" />
-                                    {row.sets.length > 1 && <button onClick={() => removeIndependentSet(idx, si)} className="text-zinc-600"><X size={13} /></button>}
+                                    {row.sets.length > 1 && <button onClick={() => removeIndependentSet(idx, si)} aria-label="Remove this set" className="text-zinc-500"><X size={13} /></button>}
                                   </div>
                                 ))}
-                                <button onClick={() => addIndependentSet(idx)} className="text-[11px] text-zinc-500 flex items-center gap-1"><Plus size={11} />Add set</button>
+                                <button onClick={() => addIndependentSet(idx)} className="text-[11px] text-zinc-400 flex items-center gap-1"><Plus size={11} />Add set</button>
                                 <div>
-                                  <p className="text-[10px] text-zinc-500 mb-1">RPE</p>
+                                  <p className="text-[10px] text-zinc-400 mb-1">RPE</p>
                                   <div className="flex flex-wrap gap-1">
                                     {Array.from({ length: 10 }, (_, i) => i + 1).map(n => (
                                       <button key={n} onClick={() => updateIndependentExerciseRow(idx, { ...row, rpe: n })} className={`w-6 h-6 rounded text-[11px] font-mono ${row.rpe === n ? 'bg-amber-500 text-zinc-900' : 'bg-zinc-900 text-zinc-400'}`}>{n}</button>
                                     ))}
                                   </div>
-                                  {row.rpe != null && <p className="text-[10px] text-zinc-500 mt-1">{RPE_DESCRIPTIONS[row.rpe]}</p>}
+                                  {row.rpe != null && <p className="text-[10px] text-zinc-400 mt-1">{RPE_DESCRIPTIONS[row.rpe]}</p>}
                                 </div>
                               </div>
                             ))}
@@ -3418,12 +3540,12 @@ export default function HybridAthleteApp() {
                               <span className="flex-1">{r.type} run</span>
                               <span className="font-mono text-xs text-zinc-400 shrink-0">{r.distance}mi · {r.time}{r.effort != null ? ` · RPE ${r.effort}` : ''}</span>
                               <button onClick={() => editIndependentRun(entry.date, r.id)} className="text-[10px] text-teal-400 font-bold uppercase shrink-0">Edit</button>
-                              <button onClick={() => deleteIndependentRun(entry.date, r.id)} className="text-zinc-600 shrink-0"><X size={12} /></button>
+                              <button onClick={() => deleteIndependentRun(entry.date, r.id)} aria-label="Delete this logged run" className="text-zinc-500 shrink-0"><X size={12} /></button>
                             </div>
                             {r.laps?.length > 0 && (
                               <div className="mt-1 pl-2 border-l border-zinc-700 space-y-0.5">
                                 {r.laps.map((l, li) => (
-                                  <p key={li} className="text-[10px] text-zinc-500 font-mono">{LAP_TYPE_LABELS[l.type] || l.type}: {l.distance}mi · {l.time}</p>
+                                  <p key={li} className="text-[10px] text-zinc-400 font-mono">{LAP_TYPE_LABELS[l.type] || l.type}: {l.distance}mi · {l.time}</p>
                                 ))}
                               </div>
                             )}
@@ -3442,7 +3564,7 @@ export default function HybridAthleteApp() {
                             </div>
                           )}
                           <div>
-                            <p className="text-[10px] text-zinc-500 mb-1">Run type</p>
+                            <p className="text-[10px] text-zinc-400 mb-1">Run type</p>
                             <select value={independentRunDraft.runType} onChange={e => setIndependentRunDraft(d => ({ ...d, runType: e.target.value }))} className="w-full bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs">
                               <option value="Easy">Easy</option><option value="Long">Long</option><option value="Tempo">Tempo</option><option value="Interval">Interval</option><option value="Race">Race</option>
                             </select>
@@ -3456,7 +3578,7 @@ export default function HybridAthleteApp() {
                             <p className="text-[11px] text-teal-400">Total: {lapTotals(independentRunDraft.laps).distance || 0}mi · {lapTotals(independentRunDraft.laps).time || '0:00'} (from laps below)</p>
                           )}
                           <div className="space-y-1.5">
-                            <p className="text-[10px] text-zinc-500">Laps (optional)</p>
+                            <p className="text-[10px] text-zinc-400">Laps (optional)</p>
                             {independentRunDraft.laps.map((lap, li) => (
                               <div key={li} className="flex items-center gap-1.5">
                                 <select value={lap.type} onChange={e => updateIndependentLap(li, 'type', e.target.value)} className="bg-zinc-900 border border-zinc-700 rounded px-1.5 py-1 text-[11px] w-24 shrink-0">
@@ -3464,20 +3586,20 @@ export default function HybridAthleteApp() {
                                 </select>
                                 <input placeholder="mi" value={lap.distance} onChange={e => updateIndependentLap(li, 'distance', e.target.value)} className="w-14 bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs" />
                                 <input placeholder="mm:ss" value={lap.time} onChange={e => updateIndependentLap(li, 'time', autoFormatMinSec(e.target.value))} className="w-16 bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs" />
-                                <button onClick={() => removeIndependentLap(li)} className="text-zinc-600 shrink-0"><X size={13} /></button>
+                                <button onClick={() => removeIndependentLap(li)} aria-label="Remove this lap" className="text-zinc-500 shrink-0"><X size={13} /></button>
                               </div>
                             ))}
                             <button onClick={addIndependentLap} className="w-full py-1.5 rounded border border-zinc-700 text-[11px] font-bold uppercase tracking-wide flex items-center justify-center gap-1"><Plus size={11} />Add lap</button>
                           </div>
                           <input placeholder="notes (optional)" value={independentRunDraft.runNotes} onChange={e => setIndependentRunDraft(d => ({ ...d, runNotes: e.target.value }))} className="w-full bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs" />
                           <div>
-                            <p className="text-[10px] text-zinc-500 mb-1">Effort (RPE)</p>
+                            <p className="text-[10px] text-zinc-400 mb-1">Effort (RPE)</p>
                             <div className="flex flex-wrap gap-1">
                               {Array.from({ length: 10 }, (_, i) => i + 1).map(n => (
                                 <button key={n} onClick={() => setIndependentRunDraft(d => ({ ...d, runEffort: n }))} className={`w-6 h-6 rounded text-[11px] font-mono ${independentRunDraft.runEffort === n ? 'bg-amber-500 text-zinc-900' : 'bg-zinc-900 text-zinc-400'}`}>{n}</button>
                               ))}
                             </div>
-                            {independentRunDraft.runEffort != null && <p className="text-[10px] text-zinc-500 mt-1">{RPE_DESCRIPTIONS[independentRunDraft.runEffort]}</p>}
+                            {independentRunDraft.runEffort != null && <p className="text-[10px] text-zinc-400 mt-1">{RPE_DESCRIPTIONS[independentRunDraft.runEffort]}</p>}
                           </div>
                           <div className="flex gap-2 pt-1">
                             <button onClick={() => { setShowIndependentRunForm(false); setIndependentRunDraft(emptyIndependentRunDraft()); }} className="flex-1 py-2 rounded bg-zinc-800 border border-zinc-700 text-xs font-bold uppercase tracking-wide">Cancel</button>
@@ -3495,15 +3617,15 @@ export default function HybridAthleteApp() {
                     <button className="w-full flex items-center justify-between text-left" onClick={() => toggleDay(entry)}>
                       <div>
                         <span className="text-sm font-bold">{d}</span>
-                        <span className="text-[11px] text-zinc-500 font-mono ml-2">{entry.display}</span>
+                        <span className="text-[11px] text-zinc-400 font-mono ml-2">{entry.display}</span>
                         {isToday && <span className="text-[10px] text-amber-500 uppercase font-bold ml-2">Today</span>}
                       </div>
                       <div className="flex items-center gap-2">
                         {dayComplete && <Check size={14} className="text-teal-400" />}
                         {entry.lift && <Dumbbell size={14} className="text-amber-500" />}
                         {entry.run && <Activity size={14} className="text-teal-400" />}
-                        {!entry.lift && !entry.run && <span className="text-[11px] text-zinc-600 capitalize">{entry.type.replace('_', ' ')}</span>}
-                        <ChevronRight size={14} className={`text-zinc-600 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
+                        {!entry.lift && !entry.run && <span className="text-[11px] text-zinc-500 capitalize">{entry.type.replace('_', ' ')}</span>}
+                        <ChevronRight size={14} className={`text-zinc-500 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
                       </div>
                     </button>
                     {isExpanded && (
@@ -3511,7 +3633,7 @@ export default function HybridAthleteApp() {
                         {entry.orderSuggestion && (
                           <div className="bg-zinc-900 rounded-md p-2.5 border border-zinc-700">
                             <p className="text-xs font-bold text-stone-200">Suggested order: {entry.orderSuggestion.order}</p>
-                            <p className="text-[11px] text-zinc-500 mt-0.5">{entry.orderSuggestion.reason}</p>
+                            <p className="text-[11px] text-zinc-400 mt-0.5">{entry.orderSuggestion.reason}</p>
                           </div>
                         )}
                         {entry.lift && entry.run && (
@@ -3536,12 +3658,12 @@ export default function HybridAthleteApp() {
                                         <span className="font-mono text-xs text-zinc-400">{ex.sets}x{ex.repTarget || ex.reps}{ex.weight ? ` @ ${ex.weight}lb` : ''}{!ex.weight ? ` · ${ex.loadNote}` : ''}</span>
                                       </div>
                                       {exerciseNote(ex) && <p className="text-[10px] text-amber-600/80">{exerciseNote(ex)}</p>}
-                                      {weightSourceNote(ex) && <p className="text-[10px] text-zinc-600">{weightSourceNote(ex)}</p>}
+                                      {weightSourceNote(ex) && <p className="text-[10px] text-zinc-500">{weightSourceNote(ex)}</p>}
                                       {showSugg && (
                                         <div className="mt-1 bg-zinc-900 border border-amber-600/40 rounded px-2 py-1.5 flex items-center justify-between gap-2">
                                           <div>
                                             <p className="text-[11px] text-amber-400 font-bold">{sugg.direction === 'decrease' ? '↓' : '↑'} Suggested: {sugg.direction === 'increase_reps' ? `${sugg.newReps} reps` : `${sugg.newWeight}lb`}</p>
-                                            <p className="text-[10px] text-zinc-500">{sugg.reason}</p>
+                                            <p className="text-[10px] text-zinc-400">{sugg.reason}</p>
                                           </div>
                                           <div className="flex gap-1 shrink-0">
                                             <button onClick={() => sugg.direction === 'increase_reps' ? applyRepSuggestion(ex.id, sugg.newReps, sugg.fromDate) : applyExerciseSuggestion(ex.id, sugg.newWeight, sugg.fromDate)} className="text-[10px] bg-amber-500 text-zinc-900 rounded px-2 py-1 font-bold uppercase">Apply</button>
@@ -3564,7 +3686,7 @@ export default function HybridAthleteApp() {
                                   if (log.skipped) {
                                     return (
                                       <div key={ex.id} className="bg-zinc-900 rounded-md p-2.5 flex items-center justify-between">
-                                        <span className="text-sm text-zinc-500 line-through">{displayName}</span>
+                                        <span className="text-sm text-zinc-400 line-through">{displayName}</span>
                                         <button onClick={() => toggleSkipExercise(ex.id)} className="text-[11px] text-teal-400 font-bold uppercase tracking-wide shrink-0">Undo</button>
                                       </div>
                                     );
@@ -3582,7 +3704,7 @@ export default function HybridAthleteApp() {
                                         <div className="mt-1.5 bg-zinc-800 border border-amber-600/40 rounded px-2 py-1.5 flex items-center justify-between gap-2">
                                           <div>
                                             <p className="text-[11px] text-amber-400 font-bold">{suggestions[ex.id].direction === 'decrease' ? '↓' : '↑'} Suggested: {suggestions[ex.id].direction === 'increase_reps' ? `${suggestions[ex.id].newReps} reps` : `${suggestions[ex.id].newWeight}lb`}</p>
-                                            <p className="text-[10px] text-zinc-500">{suggestions[ex.id].reason}</p>
+                                            <p className="text-[10px] text-zinc-400">{suggestions[ex.id].reason}</p>
                                           </div>
                                           <div className="flex gap-1 shrink-0">
                                             <button onClick={() => suggestions[ex.id].direction === 'increase_reps' ? applyRepSuggestion(ex.id, suggestions[ex.id].newReps, suggestions[ex.id].fromDate) : applyExerciseSuggestion(ex.id, suggestions[ex.id].newWeight, suggestions[ex.id].fromDate)} className="text-[10px] bg-amber-500 text-zinc-900 rounded px-2 py-1 font-bold uppercase">Apply</button>
@@ -3592,9 +3714,9 @@ export default function HybridAthleteApp() {
                                       )}
                                       {exOpen && (
                                         <div className="mt-2.5 pt-2.5 border-t border-zinc-800 space-y-2">
-                                          {ex.loadNote && <p className="text-[11px] text-zinc-500">{ex.loadNote}</p>}
+                                          {ex.loadNote && <p className="text-[11px] text-zinc-400">{ex.loadNote}</p>}
                                           {exerciseNote(ex) && <p className="text-[11px] text-amber-500">{exerciseNote(ex)}</p>}
-                                          {weightSourceNote(ex) && <p className="text-[11px] text-zinc-500">{weightSourceNote(ex)}</p>}
+                                          {weightSourceNote(ex) && <p className="text-[11px] text-zinc-400">{weightSourceNote(ex)}</p>}
                                           {ex.reasonNote && <p className="text-[11px] text-teal-500/80">{ex.reasonNote}</p>}
                                           {log.sets.map((s, si) => {
                                             const rowLabel = setRowLabel(ex, si);
@@ -3607,7 +3729,7 @@ export default function HybridAthleteApp() {
                                                   <input placeholder="reps" value={s.reps} onChange={e => updateSetLocal(ex.id, si, 'reps', e.target.value)} onBlur={persistCurrentLog} className="w-14 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs" />
                                                   <button onClick={() => toggleSetDone(ex, si)} className={`ml-auto w-6 h-6 rounded border flex items-center justify-center shrink-0 ${s.done ? 'bg-teal-500 border-teal-500' : 'border-zinc-600'}`}>{s.done && <Check size={12} className="text-zinc-900" />}</button>
                                                   {isLast && log.sets.length > 1 && (
-                                                    <button onClick={() => removeLastSet(ex.id)} className="text-zinc-600 shrink-0"><X size={13} /></button>
+                                                    <button onClick={() => removeLastSet(ex.id)} aria-label="Remove last set" className="text-zinc-500 shrink-0"><X size={13} /></button>
                                                   )}
                                                 </div>
                                                 {s.pendingRepMatch && (
@@ -3620,10 +3742,10 @@ export default function HybridAthleteApp() {
                                               </div>
                                             );
                                           })}
-                                          <p className="text-[10px] text-zinc-600">Set scheme: {SET_SCHEME_LABELS[ex.style] || ex.style}</p>
+                                          <p className="text-[10px] text-zinc-500">Set scheme: {SET_SCHEME_LABELS[ex.style] || ex.style}</p>
                                           <div className="flex items-center gap-3 flex-wrap">
-                                            <button onClick={() => openSwapPicker(ex, displayName, entry.lift.exercises)} className="text-[11px] text-zinc-500 flex items-center gap-1"><RefreshCw size={11} />Swap exercise</button>
-                                            <button onClick={() => changeSetScheme(entry, ex)} className="text-[11px] text-zinc-500 flex items-center gap-1"><RefreshCw size={11} />Change set scheme</button>
+                                            <button onClick={() => openSwapPicker(ex, displayName, entry.lift.exercises)} className="text-[11px] text-zinc-400 flex items-center gap-1"><RefreshCw size={11} />Swap exercise</button>
+                                            <button onClick={() => changeSetScheme(entry, ex)} className="text-[11px] text-zinc-400 flex items-center gap-1"><RefreshCw size={11} />Change set scheme</button>
                                             {ex.dropSet === 'occasionally' && log.sets.length === (ex.needsWarmup ? 1 : 0) + ex.sets && (
                                               <button onClick={() => addDropSet(ex)} className="text-[11px] text-amber-500 flex items-center gap-1"><Plus size={11} />Add drop set</button>
                                             )}
@@ -3631,13 +3753,13 @@ export default function HybridAthleteApp() {
                                           </div>
                                           {allDone && (
                                             <div>
-                                              <p className="text-[11px] text-zinc-500 mb-1">RPE for this exercise</p>
+                                              <p className="text-[11px] text-zinc-400 mb-1">RPE for this exercise</p>
                                               <div className="flex flex-wrap gap-1">
                                                 {Array.from({ length: 10 }, (_, i) => i + 1).map(n => (
                                                   <button key={n} onClick={() => setExerciseRpe(ex, n)} className={`w-7 h-7 rounded text-xs font-mono ${log.rpe === n ? 'bg-amber-500 text-zinc-900' : 'bg-zinc-800 text-zinc-400'}`}>{n}</button>
                                                 ))}
                                               </div>
-                                              {log.rpe != null && <p className="text-[11px] text-zinc-500 mt-1">{RPE_DESCRIPTIONS[log.rpe]}</p>}
+                                              {log.rpe != null && <p className="text-[11px] text-zinc-400 mt-1">{RPE_DESCRIPTIONS[log.rpe]}</p>}
                                             </div>
                                           )}
                                         </div>
@@ -3684,7 +3806,7 @@ export default function HybridAthleteApp() {
                               <div className="mb-2 bg-zinc-900 border border-amber-600/40 rounded px-2 py-1.5 flex items-center justify-between gap-2">
                                 <div>
                                   <p className="text-[11px] text-amber-400 font-bold">{sugg.direction === 'increase' ? '↑' : '↓'} Suggested: {sugg.newDistance} mi</p>
-                                  <p className="text-[10px] text-zinc-500">{sugg.reason}</p>
+                                  <p className="text-[10px] text-zinc-400">{sugg.reason}</p>
                                 </div>
                                 <div className="flex gap-1 shrink-0">
                                   <button onClick={() => applyRunSuggestion(`run-${entry.weekday}`, sugg.newDistance, sugg.fromDate)} className="text-[10px] bg-amber-500 text-zinc-900 rounded px-2 py-1 font-bold uppercase">Apply</button>
@@ -3702,7 +3824,7 @@ export default function HybridAthleteApp() {
                                 {garminAnalysis && (
                                   <div className="mt-2 bg-zinc-900 border border-teal-600/40 rounded px-2.5 py-2 space-y-1">
                                     {garminAnalysis.map((line, i) => <p key={i} className="text-[11px] text-teal-300">{line}</p>)}
-                                    {(safeRun.avgHR || safeRun.maxHR) && <p className="text-[10px] text-zinc-500">avg {safeRun.avgHR || '—'} bpm · max {safeRun.maxHR || '—'} bpm</p>}
+                                    {(safeRun.avgHR || safeRun.maxHR) && <p className="text-[10px] text-zinc-400">avg {safeRun.avgHR || '—'} bpm · max {safeRun.maxHR || '—'} bpm</p>}
                                   </div>
                                 )}
                               </div>
@@ -3710,23 +3832,23 @@ export default function HybridAthleteApp() {
                             {isLoggable && safeRun && (entry.run.type === 'Quality' || entry.run.type === 'Tempo') && (
                               <div className="space-y-3">
                                 <div>
-                                  <p className="text-[10px] text-zinc-500 mb-1">Warm-up</p>
+                                  <p className="text-[10px] text-zinc-400 mb-1">Warm-up</p>
                                   <div className="grid grid-cols-2 gap-2">
                                     <input placeholder="miles" value={safeRun.warmup.distance} onChange={e => updateRunPhase('warmup', 'distance', e.target.value, entry)} className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs" />
                                     <input placeholder="time" value={safeRun.warmup.time} onChange={e => updateRunPhase('warmup', 'time', autoFormatMinSec(e.target.value), entry)} className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs" />
                                   </div>
-                                  {actualPaceSeconds(safeRun.warmup.distance, safeRun.warmup.time) && <p className="text-[10px] text-zinc-500 mt-1">{paceFromSeconds(actualPaceSeconds(safeRun.warmup.distance, safeRun.warmup.time))}/mi</p>}
+                                  {actualPaceSeconds(safeRun.warmup.distance, safeRun.warmup.time) && <p className="text-[10px] text-zinc-400 mt-1">{paceFromSeconds(actualPaceSeconds(safeRun.warmup.distance, safeRun.warmup.time))}/mi</p>}
                                 </div>
                                 {entry.run.type === 'Quality' && (
                                   <div>
-                                    <p className="text-[10px] text-zinc-500 mb-1">Intervals ({safeRun.intervals.length}x {spec.intervalMiles}mi)</p>
+                                    <p className="text-[10px] text-zinc-400 mb-1">Intervals ({safeRun.intervals.length}x {spec.intervalMiles}mi)</p>
                                     <div className="space-y-1.5">
                                       {safeRun.intervals.map((iv, i) => {
                                         const actualSec = timeStrToSeconds(iv.time);
                                         const diff = actualSec != null ? paceDiffLabel(actualSec, prescribedIntervalSec) : null;
                                         return (
                                           <div key={i} className="flex items-center gap-2">
-                                            <span className="text-[10px] text-zinc-500 w-8 font-mono shrink-0">#{i + 1}</span>
+                                            <span className="text-[10px] text-zinc-400 w-8 font-mono shrink-0">#{i + 1}</span>
                                             <input placeholder="mm:ss" value={iv.time} onChange={e => updateRunInterval(i, autoFormatMinSec(e.target.value), entry)} className="w-20 bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs" />
                                             {diff && <span className={`text-[10px] font-bold ${diff.color}`}>{diff.text}</span>}
                                           </div>
@@ -3737,7 +3859,7 @@ export default function HybridAthleteApp() {
                                 )}
                                 {entry.run.type === 'Tempo' && (
                                   <div>
-                                    <p className="text-[10px] text-zinc-500 mb-1">Tempo portion</p>
+                                    <p className="text-[10px] text-zinc-400 mb-1">Tempo portion</p>
                                     <div className="grid grid-cols-2 gap-2">
                                       <input placeholder="miles" value={safeRun.tempo.distance} onChange={e => updateRunPhase('tempo', 'distance', e.target.value, entry)} className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs" />
                                       <input placeholder="time" value={safeRun.tempo.time} onChange={e => updateRunPhase('tempo', 'time', autoFormatMinSec(e.target.value), entry)} className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs" />
@@ -3748,21 +3870,21 @@ export default function HybridAthleteApp() {
                                   </div>
                                 )}
                                 <div>
-                                  <p className="text-[10px] text-zinc-500 mb-1">Cooldown</p>
+                                  <p className="text-[10px] text-zinc-400 mb-1">Cooldown</p>
                                   <div className="grid grid-cols-2 gap-2">
                                     <input placeholder="miles" value={safeRun.cooldown.distance} onChange={e => updateRunPhase('cooldown', 'distance', e.target.value, entry)} className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs" />
                                     <input placeholder="time" value={safeRun.cooldown.time} onChange={e => updateRunPhase('cooldown', 'time', autoFormatMinSec(e.target.value), entry)} className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs" />
                                   </div>
-                                  {actualPaceSeconds(safeRun.cooldown.distance, safeRun.cooldown.time) && <p className="text-[10px] text-zinc-500 mt-1">{paceFromSeconds(actualPaceSeconds(safeRun.cooldown.distance, safeRun.cooldown.time))}/mi</p>}
+                                  {actualPaceSeconds(safeRun.cooldown.distance, safeRun.cooldown.time) && <p className="text-[10px] text-zinc-400 mt-1">{paceFromSeconds(actualPaceSeconds(safeRun.cooldown.distance, safeRun.cooldown.time))}/mi</p>}
                                 </div>
                                 <div>
-                                  <p className="text-[11px] text-zinc-500 mb-1">Effort (RPE)</p>
+                                  <p className="text-[11px] text-zinc-400 mb-1">Effort (RPE)</p>
                                   <div className="flex flex-wrap gap-1">
                                     {Array.from({ length: 10 }, (_, i) => i + 1).map(n => (
                                       <button key={n} onClick={() => updateRun('effort', n, entry)} className={`w-7 h-7 rounded text-xs font-mono ${safeRun.effort === n ? 'bg-teal-500 text-zinc-900' : 'bg-zinc-800 text-zinc-400'}`}>{n}</button>
                                     ))}
                                   </div>
-                                  {safeRun.effort != null && <p className="text-[11px] text-zinc-500 mt-1">{RPE_DESCRIPTIONS[safeRun.effort]}</p>}
+                                  {safeRun.effort != null && <p className="text-[11px] text-zinc-400 mt-1">{RPE_DESCRIPTIONS[safeRun.effort]}</p>}
                                 </div>
                                 <input placeholder="notes (optional)" value={safeRun.notes} onChange={e => updateRun('notes', e.target.value, entry)} className="w-full bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs" />
                               </div>
@@ -3774,13 +3896,13 @@ export default function HybridAthleteApp() {
                                   <input placeholder="time (mm:ss)" value={safeRun.time} onChange={e => updateRun('time', autoFormatMinSec(e.target.value), entry)} className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs" />
                                 </div>
                                 <div>
-                                  <p className="text-[11px] text-zinc-500 mb-1">Effort (RPE)</p>
+                                  <p className="text-[11px] text-zinc-400 mb-1">Effort (RPE)</p>
                                   <div className="flex flex-wrap gap-1">
                                     {Array.from({ length: 10 }, (_, i) => i + 1).map(n => (
                                       <button key={n} onClick={() => updateRun('effort', n, entry)} className={`w-7 h-7 rounded text-xs font-mono ${safeRun.effort === n ? 'bg-teal-500 text-zinc-900' : 'bg-zinc-800 text-zinc-400'}`}>{n}</button>
                                     ))}
                                   </div>
-                                  {safeRun.effort != null && <p className="text-[11px] text-zinc-500 mt-1">{RPE_DESCRIPTIONS[safeRun.effort]}</p>}
+                                  {safeRun.effort != null && <p className="text-[11px] text-zinc-400 mt-1">{RPE_DESCRIPTIONS[safeRun.effort]}</p>}
                                 </div>
                                 <input placeholder="notes (optional)" value={safeRun.notes} onChange={e => updateRun('notes', e.target.value, entry)} className="w-full bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs" />
                                 {safeRun.time && <p className="text-[11px] text-teal-400">Logged: {safeRun.distance}mi in {safeRun.time}, RPE {safeRun.effort}</p>}
@@ -3808,7 +3930,7 @@ export default function HybridAthleteApp() {
                             <p className="text-[11px] text-zinc-400">{dayMessage(entry.type === 'active_recovery' ? ACTIVE_RECOVERY_MESSAGES : REST_MESSAGES, entry.date)}</p>
                           </div>
                         )}
-                        {isLoggable && saveError && <p className="text-[11px] text-orange-400">Couldn't save just now — check your connection and try again.</p>}
+                        {isLoggable && saveError && <p className="text-[11px] text-orange-400">{saveErrorMessage()}</p>}
                       </div>
                     )}
                   </Card>
@@ -3822,10 +3944,10 @@ export default function HybridAthleteApp() {
               <Card>
                 <SectionHeader>Daily targets</SectionHeader>
                 <div className="grid grid-cols-4 gap-2 mt-3 text-center font-mono">
-                  <div><div className="text-lg font-bold">{macros.targetCals}</div><div className="text-[10px] text-zinc-500 uppercase">kcal</div></div>
-                  <div><div className="text-lg font-bold text-amber-400">{macros.proteinG}</div><div className="text-[10px] text-zinc-500 uppercase">protein</div></div>
-                  <div><div className="text-lg font-bold text-teal-400">{macros.carbG}</div><div className="text-[10px] text-zinc-500 uppercase">carbs</div></div>
-                  <div><div className="text-lg font-bold text-stone-300">{macros.fatG}</div><div className="text-[10px] text-zinc-500 uppercase">fat</div></div>
+                  <div><div className="text-lg font-bold">{macros.targetCals}</div><div className="text-[10px] text-zinc-400 uppercase">kcal</div></div>
+                  <div><div className="text-lg font-bold text-amber-400">{macros.proteinG}</div><div className="text-[10px] text-zinc-400 uppercase">protein</div></div>
+                  <div><div className="text-lg font-bold text-teal-400">{macros.carbG}</div><div className="text-[10px] text-zinc-400 uppercase">carbs</div></div>
+                  <div><div className="text-lg font-bold text-stone-300">{macros.fatG}</div><div className="text-[10px] text-zinc-400 uppercase">fat</div></div>
                 </div>
                 {(profile.nutritionGoal === 'cut' || profile.nutritionGoal === 'bulk') && (
                   <div className="mt-3 pt-3 border-t border-zinc-700">
@@ -3844,7 +3966,7 @@ export default function HybridAthleteApp() {
                 {todayWorkoutCalories > 0 ? (
                   <p className="text-[11px] text-amber-500 mt-2">+{todayWorkoutCalories} kcal added for today's completed training (estimated from bodyweight, volume/RPE, and run distance — mostly flowing into carbs to fuel recovery).</p>
                 ) : (
-                  <p className="text-[11px] text-zinc-600 mt-2">No completed workout yet today — target reflects rest-day baseline. Complete a session to see this adjust.</p>
+                  <p className="text-[11px] text-zinc-500 mt-2">No completed workout yet today — target reflects rest-day baseline. Complete a session to see this adjust.</p>
                 )}
               </Card>
               <Card>
@@ -3865,8 +3987,8 @@ export default function HybridAthleteApp() {
                 <div className="mt-3 space-y-1">
                   {todayFood.map((f, i) => (
                     <div key={i} className="flex items-center justify-between text-xs text-zinc-300">
-                      <span>{f.name} <span className="text-zinc-500 font-mono">{f.kcal}kcal</span></span>
-                      <button onClick={() => deleteFood(i)} className="text-zinc-600"><X size={12} /></button>
+                      <span>{f.name} <span className="text-zinc-400 font-mono">{f.kcal}kcal</span></span>
+                      <button onClick={() => deleteFood(i)} aria-label="Delete this food entry" className="text-zinc-500"><X size={12} /></button>
                     </div>
                   ))}
                 </div>
@@ -3874,10 +3996,10 @@ export default function HybridAthleteApp() {
                   <div className="mt-3 space-y-2">
                     <input placeholder="food name" value={foodDraft.name} onChange={e => setFoodDraft({ ...foodDraft, name: e.target.value })} className="w-full bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-sm" />
                     <div className="grid grid-cols-4 gap-1.5">
-                      <div><p className="text-[9px] text-zinc-500 text-center mb-0.5">kcal</p><WheelPicker value={Number(foodDraft.kcal) || 0} onChange={v => setFoodDraft({ ...foodDraft, kcal: v })} options={numRange(0, 2000, 10)} itemHeight={24} /></div>
-                      <div><p className="text-[9px] text-zinc-500 text-center mb-0.5">protein</p><WheelPicker value={Number(foodDraft.protein) || 0} onChange={v => setFoodDraft({ ...foodDraft, protein: v })} options={numRange(0, 200)} itemHeight={24} /></div>
-                      <div><p className="text-[9px] text-zinc-500 text-center mb-0.5">carbs</p><WheelPicker value={Number(foodDraft.carbs) || 0} onChange={v => setFoodDraft({ ...foodDraft, carbs: v })} options={numRange(0, 300)} itemHeight={24} /></div>
-                      <div><p className="text-[9px] text-zinc-500 text-center mb-0.5">fat</p><WheelPicker value={Number(foodDraft.fat) || 0} onChange={v => setFoodDraft({ ...foodDraft, fat: v })} options={numRange(0, 150)} itemHeight={24} /></div>
+                      <div><p className="text-[9px] text-zinc-400 text-center mb-0.5">kcal</p><WheelPicker value={Number(foodDraft.kcal) || 0} onChange={v => setFoodDraft({ ...foodDraft, kcal: v })} options={numRange(0, 2000, 10)} itemHeight={24} ariaLabel="Calories" /></div>
+                      <div><p className="text-[9px] text-zinc-400 text-center mb-0.5">protein</p><WheelPicker value={Number(foodDraft.protein) || 0} onChange={v => setFoodDraft({ ...foodDraft, protein: v })} options={numRange(0, 200)} itemHeight={24} ariaLabel="Protein in grams" /></div>
+                      <div><p className="text-[9px] text-zinc-400 text-center mb-0.5">carbs</p><WheelPicker value={Number(foodDraft.carbs) || 0} onChange={v => setFoodDraft({ ...foodDraft, carbs: v })} options={numRange(0, 300)} itemHeight={24} ariaLabel="Carbohydrates in grams" /></div>
+                      <div><p className="text-[9px] text-zinc-400 text-center mb-0.5">fat</p><WheelPicker value={Number(foodDraft.fat) || 0} onChange={v => setFoodDraft({ ...foodDraft, fat: v })} options={numRange(0, 150)} itemHeight={24} ariaLabel="Fat in grams" /></div>
                     </div>
                     <button onClick={addFood} className="w-full py-1.5 rounded bg-stone-200 text-zinc-900 text-xs font-bold uppercase tracking-wide">Add</button>
                   </div>
@@ -3893,28 +4015,28 @@ export default function HybridAthleteApp() {
               <button onClick={loadHistory} disabled={historyLoading} className="w-full py-1.5 rounded border border-zinc-700 text-xs font-bold uppercase tracking-wide flex items-center justify-center gap-1.5 text-zinc-400">
                 <RefreshCw size={12} />{historyLoading ? 'Refreshing...' : 'Refresh'}
               </button>
-              {historyLoading && <p className="text-sm text-zinc-500 text-center py-8">Loading history...</p>}
+              {historyLoading && <p className="text-sm text-zinc-400 text-center py-8">Loading history...</p>}
               {!historyLoading && historyLoaded && (
                 <>
                   {runStats && runStats.count > 0 && (
                     <Card>
                       <SectionHeader accent="teal">Running</SectionHeader>
                       <div className="grid grid-cols-3 gap-2 mt-2 text-center font-mono">
-                        <div><div className="text-lg font-bold">{runStats.totalDistance}</div><div className="text-[10px] text-zinc-500 uppercase">total mi</div></div>
-                        <div><div className="text-lg font-bold text-teal-400">{runStats.avgPace || '—'}</div><div className="text-[10px] text-zinc-500 uppercase">avg pace/mi</div></div>
-                        <div><div className="text-lg font-bold">{runStats.count}</div><div className="text-[10px] text-zinc-500 uppercase">runs logged</div></div>
+                        <div><div className="text-lg font-bold">{runStats.totalDistance}</div><div className="text-[10px] text-zinc-400 uppercase">total mi</div></div>
+                        <div><div className="text-lg font-bold text-teal-400">{runStats.avgPace || '—'}</div><div className="text-[10px] text-zinc-400 uppercase">avg pace/mi</div></div>
+                        <div><div className="text-lg font-bold">{runStats.count}</div><div className="text-[10px] text-zinc-400 uppercase">runs logged</div></div>
                       </div>
                       {(runStats.avgWarmupPace || runStats.avgCooldownPace) && (
                         <div className="grid grid-cols-2 gap-2 mt-3 pt-3 border-t border-zinc-700 text-center font-mono">
-                          <div><div className="text-sm font-bold text-zinc-300">{runStats.avgWarmupPace || '—'}</div><div className="text-[10px] text-zinc-500 uppercase">avg warm-up pace</div></div>
-                          <div><div className="text-sm font-bold text-zinc-300">{runStats.avgCooldownPace || '—'}</div><div className="text-[10px] text-zinc-500 uppercase">avg cooldown pace</div></div>
+                          <div><div className="text-sm font-bold text-zinc-300">{runStats.avgWarmupPace || '—'}</div><div className="text-[10px] text-zinc-400 uppercase">avg warm-up pace</div></div>
+                          <div><div className="text-sm font-bold text-zinc-300">{runStats.avgCooldownPace || '—'}</div><div className="text-[10px] text-zinc-400 uppercase">avg cooldown pace</div></div>
                         </div>
                       )}
                       {profile.vdot && (
                         <div className="mt-3 pt-3 border-t border-zinc-700 flex items-center justify-between">
                           <div>
                             <span className="text-lg font-bold font-mono text-teal-400">{profile.vdot.toFixed(1)}</span>
-                            <span className="text-[10px] text-zinc-500 uppercase ml-1.5">est. VO2 max</span>
+                            <span className="text-[10px] text-zinc-400 uppercase ml-1.5">est. VO2 max</span>
                           </div>
                           <span className="text-xs font-bold text-stone-400 uppercase tracking-wide">{vo2MaxCategory(profile.vdot)}</span>
                         </div>
@@ -3928,15 +4050,15 @@ export default function HybridAthleteApp() {
                         <button key={name} onClick={() => setSelectedExerciseName(name)} className="w-full flex items-center justify-between text-left py-1.5 border-b border-zinc-700 last:border-0">
                           <div>
                             <p className="text-sm">{name}</p>
-                            <p className="text-[11px] text-zinc-500">logged {stat.count}x</p>
+                            <p className="text-[11px] text-zinc-400">logged {stat.count}x</p>
                           </div>
                           <div className="flex items-center gap-2">
                             <span className="font-mono text-sm text-amber-400">{stat.currentOneRM ? `${stat.currentOneRM}lb` : '—'}</span>
-                            <ChevronRight size={14} className="text-zinc-600" />
+                            <ChevronRight size={14} className="text-zinc-500" />
                           </div>
                         </button>
                       ))}
-                      {Object.keys(exerciseStats).length === 0 && <p className="text-sm text-zinc-500">No lifts logged yet. If you've completed workouts and still see this, your data may not be saving — check Settings for the "Export my data" option to confirm.</p>}
+                      {Object.keys(exerciseStats).length === 0 && <p className="text-sm text-zinc-400">No lifts logged yet. If you've completed workouts and still see this, your data may not be saving — check Settings for the "Export my data" option to confirm.</p>}
                     </div>
                   </Card>
                 </>
@@ -3952,11 +4074,11 @@ export default function HybridAthleteApp() {
                 <button onClick={() => setSelectedExerciseName(null)} className="text-zinc-400 flex items-center gap-1 text-sm"><ChevronLeft size={16} />Back</button>
               </div>
               <h1 className="text-xl font-black uppercase tracking-wide mb-1">{selectedExerciseName}</h1>
-              <p className="text-sm text-zinc-500 mb-4">Logged {exerciseStats[selectedExerciseName].count} times</p>
+              <p className="text-sm text-zinc-400 mb-4">Logged {exerciseStats[selectedExerciseName].count} times</p>
               <Card className="mb-3">
                 <div className="text-center">
                   <div className="text-2xl font-bold font-mono text-amber-400">{exerciseStats[selectedExerciseName].currentOneRM || '—'}lb</div>
-                  <div className="text-[10px] text-zinc-500 uppercase">current estimated 1RM</div>
+                  <div className="text-[10px] text-zinc-400 uppercase">current estimated 1RM</div>
                 </div>
               </Card>
               <SectionHeader>History</SectionHeader>
@@ -3972,7 +4094,7 @@ export default function HybridAthleteApp() {
                         <span key={si} className="text-xs font-mono bg-zinc-900 rounded px-2 py-1">{s.weight}lb x{s.reps}</span>
                       ))}
                     </div>
-                    {h.oneRM && <p className="text-[11px] text-zinc-500 mt-1.5">Session 1RM: {h.oneRM}lb</p>}
+                    {h.oneRM && <p className="text-[11px] text-zinc-400 mt-1.5">Session 1RM: {h.oneRM}lb</p>}
                   </Card>
                 ))}
               </div>
@@ -3992,15 +4114,7 @@ export default function HybridAthleteApp() {
             </div>
           </div>
         )}
-        {timer && (
-          <div className="fixed bottom-16 inset-x-0 max-w-md mx-auto bg-amber-500 text-zinc-900 px-4 py-2 flex items-center justify-between font-mono text-sm font-bold z-10">
-            <span className="flex items-center gap-2">
-              <Timer size={16} />
-              {timer.done ? 'Rest done' : `Rest ${Math.floor(timer.secondsLeft / 60)}:${String(timer.secondsLeft % 60).padStart(2, '0')}`}
-            </span>
-            <button onClick={() => setTimer(null)} className="uppercase text-xs tracking-wide underline">{timer.done ? 'Dismiss' : 'Skip'}</button>
-          </div>
-        )}
+        {timer && <RestTimerBar key={timer.startedAt} total={timer.total} onDismiss={() => setTimer(null)} />}
         {pendingImportBundle && (
           <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-30 px-6">
             <div className="bg-zinc-800 border border-zinc-700 rounded-lg p-4 max-w-xs w-full">
@@ -4019,13 +4133,19 @@ export default function HybridAthleteApp() {
             <button onClick={() => setImportError('')} className="uppercase tracking-wide underline shrink-0 ml-2">Dismiss</button>
           </div>
         )}
+        {staleTabWarning && (
+          <div className="fixed bottom-16 inset-x-0 max-w-md mx-auto bg-amber-500 text-zinc-900 px-4 py-2 flex items-center justify-between gap-2 font-mono text-xs font-bold z-20">
+            <span>Your data changed in another tab — reload to avoid overwriting it.</span>
+            <button onClick={() => window.location.reload()} className="uppercase tracking-wide underline shrink-0">Reload</button>
+          </div>
+        )}
         {weighInDue && !showProfile && (
           <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-30 px-6">
             <div className="bg-zinc-800 border border-zinc-700 rounded-lg p-4 max-w-xs w-full">
               <p className="text-sm font-bold mb-1">Weekly weigh-in</p>
               <p className="text-xs text-zinc-400 mb-3">Your calorie and macro targets are based on bodyweight — updating it keeps them accurate. Turn this reminder off anytime in Profile.</p>
               <div className="flex justify-center bg-zinc-900 border border-zinc-700 rounded mb-3">
-                <WheelPicker value={weighInDraftLb ?? profile.weightLb} onChange={setWeighInDraftLb} options={numRange(70, 400)} />
+                <WheelPicker value={weighInDraftLb ?? profile.weightLb} onChange={setWeighInDraftLb} options={numRange(70, 400)} ariaLabel="Weight in pounds" />
               </div>
               <div className="flex gap-2">
                 <button onClick={skipWeighIn} className="flex-1 py-2 rounded bg-zinc-700 text-xs font-bold uppercase tracking-wide">Skip this week</button>
@@ -4039,18 +4159,18 @@ export default function HybridAthleteApp() {
             <div className="bg-zinc-800 border border-zinc-700 rounded-lg p-4 max-w-sm w-full max-h-[80vh] flex flex-col">
               <div className="flex items-center justify-between mb-1 shrink-0">
                 <p className="text-sm font-bold">Swap {swapPicker.currentName}</p>
-                <button onClick={() => setSwapPicker(null)} className="text-zinc-500"><X size={16} /></button>
+                <button onClick={() => setSwapPicker(null)} aria-label="Close swap picker" className="text-zinc-400"><X size={16} /></button>
               </div>
-              <p className="text-[11px] text-zinc-500 mb-3 shrink-0">Ranked by how closely each option matches this exercise's movement pattern, muscles worked, and fatigue cost.</p>
+              <p className="text-[11px] text-zinc-400 mb-3 shrink-0">Ranked by how closely each option matches this exercise's movement pattern, muscles worked, and fatigue cost.</p>
               <div className="overflow-y-auto space-y-1.5 pr-1">
-                {swapCandidates.length === 0 && <p className="text-xs text-zinc-500">No other exercises fit this slot with your current equipment.</p>}
+                {swapCandidates.length === 0 && <p className="text-xs text-zinc-400">No other exercises fit this slot with your current equipment.</p>}
                 {swapCandidates.map(c => (
                   <button key={c.exercise.exercise} onClick={() => applySwapChoice(c.exercise.exercise)} className="w-full text-left bg-zinc-900 border border-zinc-700 rounded px-2.5 py-2 hover:border-teal-600/60">
                     <div className="flex items-start gap-2">
                       <span className={`shrink-0 w-6 h-6 rounded flex items-center justify-center text-[11px] font-black ${TIER_COLORS[c.tier]}`}>{c.tier}</span>
                       <div className="min-w-0">
                         <p className="text-sm truncate">{c.exercise.exercise}</p>
-                        <p className="text-[10px] text-zinc-500">{c.reasons.join(' · ')}</p>
+                        <p className="text-[10px] text-zinc-400">{c.reasons.join(' · ')}</p>
                       </div>
                     </div>
                   </button>
@@ -4066,7 +4186,7 @@ export default function HybridAthleteApp() {
             { id: 'fuel', icon: UtensilsCrossed, label: 'Fuel' },
             { id: 'stats', icon: BarChart3, label: 'Stats' }
           ].map(t => (
-            <button key={t.id} onClick={() => { setTab(t.id); if (t.id === 'stats' && !historyLoaded && !historyLoading) loadHistory(); }} className={`flex flex-col items-center gap-0.5 px-3 ${tab === t.id ? 'text-stone-100' : 'text-zinc-600'}`}>
+            <button key={t.id} onClick={() => { setTab(t.id); if (t.id === 'stats' && !historyLoaded && !historyLoading) loadHistory(); }} className={`flex flex-col items-center gap-0.5 px-3 ${tab === t.id ? 'text-stone-100' : 'text-zinc-500'}`}>
               <t.icon size={18} />
               <span className="text-[10px] font-bold uppercase tracking-wide">{t.label}</span>
             </button>

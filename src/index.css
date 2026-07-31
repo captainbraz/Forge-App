@@ -1,1 +1,9 @@
 @import "tailwindcss";
+
+/* Baseline keyboard-focus visibility — most controls in this app are bare Tailwind
+   utility classes with no focus styling of their own, so without this a keyboard
+   user has no way to see where focus currently is. */
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, [tabindex]:focus-visible {
+  outline: 2px solid #2dd4bf;
+  outline-offset: 2px;
+}
