@@ -6,7 +6,7 @@ import {
 } from 'lucide-react';
 import {
   exerciseLibrary, libraryExerciseByName, CATEGORIES, slotsForDayType, slotForKind, selectExerciseForSlot,
-  bumpFatigue, orderDayExercises, estimateOneRMForName, TESTED_LIFT_NAMES
+  bumpFatigue, orderDayExercises, estimateOneRMForName, TESTED_LIFT_NAMES, rankReplacements
 } from './exerciseEngine.js';
 
 const FEEDBACK_EMAIL = 'akathecaptain@gmail.com';
@@ -112,6 +112,11 @@ function prescriptionFor(libEx, goal) {
   return { sets, repLow: libEx.repLow, repHigh: libEx.repHigh, style, dropSet: DROP_SET_MAP[libEx.dropSet] || 'no' };
 }
 const SET_SCHEME_LABELS = { straight: 'Straight sets', reverse_pyramid: 'Reverse pyramid', pyramid: 'Pyramid' };
+const EQUIPMENT_TIER_LABELS = { barbell: 'Full gym', dumbbell: 'Dumbbells only', bodyweight: 'Bodyweight only' };
+const TIER_COLORS = {
+  S: 'bg-amber-500 text-zinc-900', A: 'bg-teal-500 text-zinc-900', B: 'bg-blue-500/80 text-zinc-900',
+  C: 'bg-zinc-600 text-zinc-100', D: 'bg-orange-600 text-zinc-100', F: 'bg-red-600 text-zinc-100'
+};
 function nextSetScheme(current) {
   const order = ['straight', 'reverse_pyramid', 'pyramid'];
   return order[(order.indexOf(current) + 1) % order.length];
@@ -1312,6 +1317,11 @@ export default function HybridAthleteApp() {
   const [logsByDate, setLogsByDate] = useState({});
   const dayLog = expandedDate ? logsByDate[expandedDate] : null;
   const [expandedExerciseId, setExpandedExerciseId] = useState(null);
+  const [swapPicker, setSwapPicker] = useState(null);
+  const [showExerciseLibrary, setShowExerciseLibrary] = useState(false);
+  const [libraryQuery, setLibraryQuery] = useState('');
+  const [libraryCategory, setLibraryCategory] = useState('all');
+  const [libraryScope, setLibraryScope] = useState('all');
   const [sessionFocus, setSessionFocus] = useState(null);
   const [timer, setTimer] = useState(null);
   const [suggestions, setSuggestions] = useState({});
@@ -1860,12 +1870,16 @@ export default function HybridAthleteApp() {
     const newSets = setPlan.map(p => ({ weight: p.targetWeight != null ? String(p.targetWeight) : '', reps: p.targetReps != null ? String(p.targetReps) : '', done: false }));
     updateDayLog(log => ({ ...log, lift: { ...log.lift, [ex.id]: { ...log.lift[ex.id], sets: newSets, rpe: null } } }));
   }
-  function swapToday(exId, ex, currentName) {
+  function openSwapPicker(ex, currentName, allExercises) {
+    const otherNames = allExercises.filter(e => e.id !== ex.id).map(e => e.name);
+    setSwapPicker({ exId: ex.id, ex, currentName, otherNames });
+  }
+  function applySwapChoice(chosenName) {
+    if (!swapPicker) return;
+    const { exId, ex } = swapPicker;
     updateDayLog(log => {
-      const slot = slotForKind(ex.slotKind);
-      const picked = selectExerciseForSlot(slot, { equipmentTier: profile.equipment, injuryAreas: new Set(), usedNames: new Set([currentName]), categoryFatigue: new Map(), seqIndex: Date.now(), customExercises: profile.customExercises || [] });
-      if (!picked) return log;
-      const libEx = picked.exercise;
+      const libEx = libraryExerciseByName(chosenName);
+      if (!libEx) return log;
       const prescription = prescriptionFor(libEx, profile.strengthGoal);
       const { repLow, repHigh, style, dropSet, sets } = prescription;
       const estimate = estimateOneRMFor(libEx.exercise, profile.oneRMs || {}, profile.learnedOneRMs);
@@ -1874,6 +1888,7 @@ export default function HybridAthleteApp() {
       const newSets = setPlan.map(p => ({ weight: p.targetWeight != null ? String(p.targetWeight) : '', reps: p.targetReps != null ? String(p.targetReps) : '', done: false }));
       return { ...log, lift: { ...log.lift, [exId]: { swappedName: libEx.exercise, sets: newSets, rpe: null, skipped: false } } };
     });
+    setSwapPicker(null);
   }
   function toggleSkipExercise(exId) {
     updateDayLog(log => {
@@ -2315,6 +2330,14 @@ export default function HybridAthleteApp() {
     const idx = calendar.findIndex(w => Object.values(w.days).some(d => d.date === todayStr));
     return idx === -1 ? 0 : idx;
   }, [calendar, todayStr]);
+  const swapCandidates = useMemo(() => {
+    if (!swapPicker || !profile) return [];
+    const currentLibEx = libraryExerciseByName(swapPicker.currentName) || libraryExerciseByName(swapPicker.ex.name);
+    if (!currentLibEx) return [];
+    const slot = slotForKind(swapPicker.ex.slotKind);
+    const injuryAreas = activeInjuryAreas(profile.injuries);
+    return rankReplacements(currentLibEx, slot, { equipmentTier: profile.equipment, injuryAreas, excludeNames: new Set(swapPicker.otherNames), customExercises: profile.customExercises || [] });
+  }, [swapPicker, profile]);
   const todayEntry = useMemo(() => {
     if (!calendar) return null;
     for (const w of calendar) { const found = Object.values(w.days).find(d => d.date === todayStr); if (found) return found; }
@@ -3082,6 +3105,58 @@ export default function HybridAthleteApp() {
     );
   }
 
+  if (showExerciseLibrary) {
+    const customList = profile?.customExercises || [];
+    const scopeList = libraryScope === 'custom' ? customList : exerciseLibrary;
+    const filtered = scopeList.filter(ex => {
+      const name = libraryScope === 'custom' ? ex.name : ex.exercise;
+      if (libraryQuery && !name.toLowerCase().includes(libraryQuery.toLowerCase())) return false;
+      if (libraryCategory !== 'all' && ex.category !== libraryCategory) return false;
+      return true;
+    });
+    return (
+      <div className="min-h-screen bg-zinc-900 text-stone-100 p-4">
+        <div className="max-w-sm mx-auto">
+          <div className="flex items-center justify-between mb-4">
+            <h1 className="text-lg font-black uppercase tracking-widest">Exercise library</h1>
+            <button onClick={() => setShowExerciseLibrary(false)} className="text-sm font-bold text-teal-400 uppercase tracking-wide">Done</button>
+          </div>
+          <div className="flex gap-2 mb-2">
+            <button onClick={() => setLibraryScope('all')} className={`flex-1 py-1.5 rounded text-xs font-bold uppercase tracking-wide ${libraryScope === 'all' ? 'bg-teal-500 text-zinc-900' : 'bg-zinc-800 text-zinc-400 border border-zinc-700'}`}>All ({exerciseLibrary.length})</button>
+            <button onClick={() => setLibraryScope('custom')} className={`flex-1 py-1.5 rounded text-xs font-bold uppercase tracking-wide ${libraryScope === 'custom' ? 'bg-teal-500 text-zinc-900' : 'bg-zinc-800 text-zinc-400 border border-zinc-700'}`}>My custom ({customList.length})</button>
+          </div>
+          <input value={libraryQuery} onChange={e => setLibraryQuery(e.target.value)} placeholder="Search exercises" className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1.5 text-sm mb-2" />
+          <select value={libraryCategory} onChange={e => setLibraryCategory(e.target.value)} className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1.5 text-xs mb-3">
+            <option value="all">All categories</option>
+            {CATEGORIES.map(cat => <option key={cat} value={cat}>{cat.replace(' Exercises', '')}</option>)}
+          </select>
+          <p className="text-[11px] text-zinc-500 mb-2">{filtered.length} exercise{filtered.length === 1 ? '' : 's'}</p>
+          <div className="space-y-1.5">
+            {filtered.length === 0 && <p className="text-sm text-zinc-500">No exercises match.</p>}
+            {libraryScope === 'custom' ? filtered.map(ex => (
+              <Card key={`${ex.category}-${ex.name}`}>
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-sm font-bold truncate">{ex.name}</p>
+                  <span className="text-[10px] text-teal-400 uppercase shrink-0">custom</span>
+                </div>
+                <p className="text-[11px] text-zinc-500 mt-0.5">{(ex.category || '').replace(' Exercises', '')} · {EQUIPMENT_TIER_LABELS[ex.equipmentTier] || ex.equipmentTier}</p>
+              </Card>
+            )) : filtered.map(ex => (
+              <Card key={`${ex.category}-${ex.exercise}`}>
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-sm font-bold truncate">{ex.exercise}</p>
+                  {ex.isCompound && <span className="text-[10px] text-amber-400 uppercase shrink-0">compound</span>}
+                </div>
+                <p className="text-[11px] text-zinc-500 mt-0.5">{ex.category.replace(' Exercises', '')} · {ex.primaryMuscle}</p>
+                <p className="text-[10px] text-zinc-600 mt-0.5">{ex.equipment} · Fatigue: {ex.fatigueCost} · {ex.sets} sets x {ex.reps}</p>
+              </Card>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (showChangelog) {
     return (
       <div className="min-h-screen bg-zinc-900 text-stone-100 p-4">
@@ -3162,6 +3237,7 @@ export default function HybridAthleteApp() {
                 <button onClick={() => { setShowSettingsMenu(false); setShowInjuryManager(true); }} className="w-full text-left px-3 py-2.5 text-sm hover:bg-zinc-700">Manage injuries</button>
                 <button onClick={() => { setShowSettingsMenu(false); startEditingTrainingSetup(); }} className="w-full text-left px-3 py-2.5 text-sm hover:bg-zinc-700 border-t border-zinc-700">Edit training setup</button>
                 <button onClick={() => { setShowSettingsMenu(false); setShowRpeGuide(true); }} className="w-full text-left px-3 py-2.5 text-sm hover:bg-zinc-700 border-t border-zinc-700">RPE guide</button>
+                <button onClick={() => { setShowSettingsMenu(false); setShowExerciseLibrary(true); }} className="w-full text-left px-3 py-2.5 text-sm hover:bg-zinc-700 border-t border-zinc-700">Exercise library</button>
                 <button onClick={() => { setShowSettingsMenu(false); exportAllData(); }} disabled={exporting} className="w-full text-left px-3 py-2.5 text-sm hover:bg-zinc-700 border-t border-zinc-700">{exporting ? 'Exporting...' : 'Export my data'}</button>
                 <button onClick={() => { setShowSettingsMenu(false); setImportError(''); importFileRef.current?.click(); }} className="w-full text-left px-3 py-2.5 text-sm hover:bg-zinc-700 border-t border-zinc-700">Import my data</button>
                 <button onClick={() => { setShowSettingsMenu(false); setShowBlockHistory(true); }} className="w-full text-left px-3 py-2.5 text-sm hover:bg-zinc-700 border-t border-zinc-700">Past blocks{blockHistory.length > 0 ? ` (${blockHistory.length})` : ''}</button>
@@ -3546,7 +3622,7 @@ export default function HybridAthleteApp() {
                                           })}
                                           <p className="text-[10px] text-zinc-600">Set scheme: {SET_SCHEME_LABELS[ex.style] || ex.style}</p>
                                           <div className="flex items-center gap-3 flex-wrap">
-                                            <button onClick={() => swapToday(ex.id, ex, displayName)} className="text-[11px] text-zinc-500 flex items-center gap-1"><RefreshCw size={11} />Swap exercise</button>
+                                            <button onClick={() => openSwapPicker(ex, displayName, entry.lift.exercises)} className="text-[11px] text-zinc-500 flex items-center gap-1"><RefreshCw size={11} />Swap exercise</button>
                                             <button onClick={() => changeSetScheme(entry, ex)} className="text-[11px] text-zinc-500 flex items-center gap-1"><RefreshCw size={11} />Change set scheme</button>
                                             {ex.dropSet === 'occasionally' && log.sets.length === (ex.needsWarmup ? 1 : 0) + ex.sets && (
                                               <button onClick={() => addDropSet(ex)} className="text-[11px] text-amber-500 flex items-center gap-1"><Plus size={11} />Add drop set</button>
@@ -3954,6 +4030,31 @@ export default function HybridAthleteApp() {
               <div className="flex gap-2">
                 <button onClick={skipWeighIn} className="flex-1 py-2 rounded bg-zinc-700 text-xs font-bold uppercase tracking-wide">Skip this week</button>
                 <button onClick={() => recordWeighIn(weighInDraftLb ?? profile.weightLb)} className="flex-1 py-2 rounded bg-teal-500 text-zinc-900 text-xs font-bold uppercase tracking-wide">Save weight</button>
+              </div>
+            </div>
+          </div>
+        )}
+        {swapPicker && (
+          <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-30 px-4">
+            <div className="bg-zinc-800 border border-zinc-700 rounded-lg p-4 max-w-sm w-full max-h-[80vh] flex flex-col">
+              <div className="flex items-center justify-between mb-1 shrink-0">
+                <p className="text-sm font-bold">Swap {swapPicker.currentName}</p>
+                <button onClick={() => setSwapPicker(null)} className="text-zinc-500"><X size={16} /></button>
+              </div>
+              <p className="text-[11px] text-zinc-500 mb-3 shrink-0">Ranked by how closely each option matches this exercise's movement pattern, muscles worked, and fatigue cost.</p>
+              <div className="overflow-y-auto space-y-1.5 pr-1">
+                {swapCandidates.length === 0 && <p className="text-xs text-zinc-500">No other exercises fit this slot with your current equipment.</p>}
+                {swapCandidates.map(c => (
+                  <button key={c.exercise.exercise} onClick={() => applySwapChoice(c.exercise.exercise)} className="w-full text-left bg-zinc-900 border border-zinc-700 rounded px-2.5 py-2 hover:border-teal-600/60">
+                    <div className="flex items-start gap-2">
+                      <span className={`shrink-0 w-6 h-6 rounded flex items-center justify-center text-[11px] font-black ${TIER_COLORS[c.tier]}`}>{c.tier}</span>
+                      <div className="min-w-0">
+                        <p className="text-sm truncate">{c.exercise.exercise}</p>
+                        <p className="text-[10px] text-zinc-500">{c.reasons.join(' · ')}</p>
+                      </div>
+                    </div>
+                  </button>
+                ))}
               </div>
             </div>
           </div>

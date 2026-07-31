@@ -109,7 +109,7 @@ export function estimateOneRMForName(name, oneRMs, learnedOneRMs) {
 // against the full library by category + movement-pattern keyword instead of a tiny hardcoded pool.
 const SLOT_KINDS = {
   squat: { category: 'Leg Exercises', movementPattern: /squat/i, role: 'primary' },
-  hinge: { category: 'Back Exercises', movementPattern: /hip hinge/i, role: 'primary' },
+  hinge: { category: ['Back Exercises', 'Glute Exercises'], movementPattern: /hip hinge/i, role: 'primary' },
   pushHoriz: { category: 'Chest Exercises', movementPattern: /horizontal push/i, role: 'primary' },
   chestFly: { category: 'Chest Exercises', movementPattern: /horizontal adduction|fly/i, role: 'accessory' },
   // Exact match only — excludes Olympic jerk variants ("Olympic - Vertical Push"), which are
@@ -119,7 +119,7 @@ const SLOT_KINDS = {
   pullVert: { category: 'Back Exercises', movementPattern: /vertical pull/i, role: 'primary' },
   rearDelt: { category: 'Shoulder Exercises', movementPattern: /horizontal pull/i, role: 'accessory' },
   core: { category: 'Ab Exercises', movementPattern: null, role: 'accessory' },
-  legAccessory: { category: ['Leg Exercises', 'Calves Exercises'], movementPattern: /isolation/i, role: 'accessory' },
+  legAccessory: { category: ['Leg Exercises', 'Calves Exercises', 'Glute Exercises'], movementPattern: /isolation/i, role: 'accessory' },
   pushAccessory: { category: 'Triceps Exercises', movementPattern: null, role: 'accessory' },
   pullAccessory: { category: 'Bicep Exercises', movementPattern: null, role: 'accessory' }
 };
@@ -177,7 +177,7 @@ function categoriesFromAvoidText(text) {
   return AVOID_KEYWORDS.filter(k => k.re.test(text)).map(k => k.category);
 }
 
-function candidatesForSlot(slot, { equipmentTier, customExercises }) {
+export function candidatesForSlot(slot, { equipmentTier, customExercises }) {
   const categories = Array.isArray(slot.category) ? slot.category : [slot.category];
   const matchesBase = ex => categories.includes(ex.category) && (!slot.movementPattern || slot.movementPattern.test(ex.movementPattern));
   let pool = exerciseLibrary.filter(ex => matchesBase(ex) && ex.equipmentTier === equipmentTier);
@@ -258,6 +258,57 @@ export function bumpFatigue(categoryFatigue, ex) {
       categoryFatigue.set(cat, (categoryFatigue.get(cat) || 0) + ex.fatigueScore * 0.5);
     }
   });
+}
+
+// ---------- manual swap: ranked, explained replacement candidates ----------
+function wordsOf(str) { return new Set(String(str || '').toLowerCase().split(/[^a-z]+/).filter(Boolean)); }
+function overlapFraction(aStr, bStr) {
+  const a = wordsOf(aStr), b = wordsOf(bStr);
+  if (!a.size || !b.size) return 0;
+  let hit = 0;
+  a.forEach(w => { if (b.has(w)) hit++; });
+  return hit / Math.max(a.size, b.size);
+}
+const TIER_THRESHOLDS = [['S', 85], ['A', 70], ['B', 55], ['C', 40], ['D', 25]];
+function tierForScore(score) {
+  for (const [tier, min] of TIER_THRESHOLDS) if (score >= min) return tier;
+  return 'F';
+}
+/**
+ * Scores every valid same-slot candidate against the currently prescribed exercise on movement
+ * pattern, secondary-muscle overlap, primary muscle, fatigue/CNS cost, and compound-vs-isolation —
+ * for a user-facing "choose your own replacement" picker rather than the auto-generation selector.
+ */
+export function rankReplacements(currentEx, slot, ctx) {
+  const { equipmentTier, injuryAreas = new Set(), excludeNames = new Set(), customExercises = [] } = ctx;
+  const candidates = candidatesForSlot(slot, { equipmentTier, customExercises })
+    .filter(ex => ex.exercise !== currentEx.exercise)
+    .filter(ex => !excludeNames.has(ex.exercise))
+    .filter(ex => !ex.areas.some(a => injuryAreas.has(a)));
+  return candidates.map(ex => {
+    let score = 0;
+    const reasons = [];
+    const patternExact = currentEx.movementPattern && ex.movementPattern === currentEx.movementPattern;
+    const patternOverlap = overlapFraction(ex.movementPattern, currentEx.movementPattern);
+    if (patternExact) { score += 30; reasons.push(`Same movement pattern (${ex.movementPattern})`); }
+    else if (patternOverlap >= 0.4) { score += 15; reasons.push('Similar movement pattern'); }
+    const muscleOverlap = overlapFraction(ex.secondaryMuscles, currentEx.secondaryMuscles);
+    if (muscleOverlap > 0) {
+      score += Math.round(20 * muscleOverlap);
+      if (muscleOverlap >= 0.4) reasons.push('Similar secondary-muscle involvement');
+    }
+    if (currentEx.primaryMuscle && ex.primaryMuscle === currentEx.primaryMuscle) { score += 15; reasons.push(`Same primary muscle (${ex.primaryMuscle})`); }
+    else if (overlapFraction(ex.primaryMuscle, currentEx.primaryMuscle) > 0) { score += 7; reasons.push('Overlapping primary muscle'); }
+    const fatigueDiff = Math.abs((ex.fatigueScore ?? 2) - (currentEx.fatigueScore ?? 2));
+    if (fatigueDiff === 0) { score += 15; reasons.push('Same fatigue cost'); }
+    else if (fatigueDiff === 1) score += 8;
+    const cnsDiff = Math.abs((ex.cnsScore ?? 1) - (currentEx.cnsScore ?? 1));
+    if (cnsDiff === 0) score += 10;
+    else if (cnsDiff === 1) score += 5;
+    if (ex.isCompound === currentEx.isCompound) { score += 10; reasons.push(ex.isCompound ? 'Also a compound movement' : 'Also an isolation movement'); }
+    if (!reasons.length) reasons.push('A different stimulus — not a close match, but still trains this slot');
+    return { exercise: ex, score, tier: tierForScore(score), reasons };
+  }).sort((a, b) => b.score - a.score);
 }
 
 // Final per-day ordering: skill/CNS-demand first, heavy compound before isolation, conditioning last.
