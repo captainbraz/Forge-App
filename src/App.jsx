@@ -4,6 +4,10 @@ import {
   ChevronRight, ChevronLeft, Plus, X, Check, AlertTriangle, CalendarDays, RefreshCw, Timer,
   User, BarChart3, Mail
 } from 'lucide-react';
+import {
+  exerciseLibrary, libraryExerciseByName, CATEGORIES, slotsForDayType, slotForKind, selectExerciseForSlot,
+  bumpFatigue, orderDayExercises, estimateOneRMForName, TESTED_LIFT_NAMES
+} from './exerciseEngine.js';
 
 const FEEDBACK_EMAIL = 'akathecaptain@gmail.com';
 function feedbackMailtoHref(text, date) {
@@ -92,122 +96,20 @@ function parseMinutesInput(val) {
 }
 
 // ---------- exercise library ----------
-const exercisePool = {
-  squat: { barbell: ['Back Squat', 'Front Squat', 'Hack Squat', 'Machine Leg Press'], dumbbell: ['Goblet Squat', 'DB Bulgarian Split Squat'], bodyweight: ['Bodyweight Squat', 'Split Squat'] },
-  hinge: { barbell: ['Trap Bar Deadlift', 'Stiff-Legged Deadlift', 'Smith Machine Good Morning', 'Cable Pull-Through'], dumbbell: ['DB Romanian Deadlift', 'Single-Leg DB RDL'], bodyweight: ['Glute Bridge', 'Single-Leg Glute Bridge'] },
-  pushHoriz: { barbell: ['Barbell Bench Press', 'Barbell Decline Bench Press', 'Smith Machine Bench Press', 'Plate-Loaded Incline Chest Press'], dumbbell: ['Dumbbell Bench Press', 'DB Incline Press'], bodyweight: ['Push-Up', 'Decline Push-Up'] },
-  chestFly: { barbell: ['Low Cable Chest Fly', 'Machine Chest Fly'], dumbbell: ['Dumbbell Fly'], bodyweight: ['Wide Push-Up'] },
-  pushVert: { barbell: ['Seated Barbell Shoulder Press', 'Overhead Press'], dumbbell: ['DB Shoulder Press', 'Arnold Press'], bodyweight: ['Pike Push-Up', 'Wall Handstand Push-Up'] },
-  pullHoriz: { barbell: ['Barbell Row', 'Pendlay Row', 'Cable Row', 'Plate-Loaded Chest-Supported Row'], dumbbell: ['Dumbbell Row', 'Incline Dumbbell Row'], bodyweight: ['Inverted Row', 'Towel Row'] },
-  pullVert: { barbell: ['Weighted Pull-Up', 'Reverse-Grip Pulldown', 'Close-Grip Pulldown'], dumbbell: ['DB Pullover'], bodyweight: ['Pull-Up', 'Band-Assisted Pull-Up'] },
-  rearDelt: { barbell: ['Cable Face Pull', 'Cable Reverse Fly'], dumbbell: ['DB Rear Delt Fly'], bodyweight: ['Towel Row'] },
-  core: { barbell: ['Weighted Plank', 'Machine Back Extension'], dumbbell: ['DB Suitcase Carry', 'Russian Twist'], bodyweight: ['Plank', 'Hanging Knee Raise', 'Hanging Leg Raise', 'Mountain Climber'] },
-  legAccessory: { barbell: ['Leg Extension', 'Machine Adduction', 'Machine Abduction', 'Cable Kickback'], dumbbell: ['Dumbbell Lunge'], bodyweight: ['Calf Raise'] },
-  pushAccessory: { barbell: ['Rope Tricep Pushdown', 'EZ-Bar Skullcrusher', 'Close-Grip Bench Press'], dumbbell: ['Single-Arm Dumbbell Tricep Extension', 'DB Lateral Raise'], bodyweight: ['Dip', 'Pike Push-Up'] },
-  pullAccessory: { barbell: ['Barbell Curl', 'EZ-Bar Curl', 'Cable Bicep Curl', 'Cable Double Bicep Curl'], dumbbell: ['Dumbbell Bicep Curl', 'Hammer Curl', 'Dumbbell Concentration Curl'], bodyweight: ['Chin-Up'] }
-};
-const PATTERN_LABELS = {
-  squat: 'Squat (quads)', hinge: 'Hinge (hamstrings/glutes)', pushHoriz: 'Horizontal push (chest)', chestFly: 'Chest fly/isolation',
-  pushVert: 'Vertical push (shoulders)', pullHoriz: 'Horizontal pull (back)', pullVert: 'Vertical pull (back)', rearDelt: 'Rear delt',
-  core: 'Core', legAccessory: 'Leg accessory', pushAccessory: 'Push accessory (triceps)', pullAccessory: 'Pull accessory (biceps)'
-};
-function poolFor(pattern, equipment, customExercises) {
-  const base = exercisePool[pattern][equipment] || exercisePool[pattern].bodyweight;
-  const custom = (customExercises || [])
-    .filter(c => c.pattern === pattern && c.equipment === equipment)
-    .map(c => c.name);
-  return [...base, ...custom];
-}
-function allCatalogNames() {
-  const names = new Set();
-  Object.values(exercisePool).forEach(tiers => Object.values(tiers).forEach(list => list.forEach(n => names.add(n))));
-  return [...names];
-}
-// Per-exercise sets/rep-range options/style/drop-set guidance. Falls back to the generic goal-based scheme when an exercise isn't listed.
-const exerciseSpecs = {
-  'Back Squat': { setsRange: [3, 5], repOptions: [[3, 5], [5, 8], [8, 12]], style: 'either', dropSet: 'no' },
-  'Front Squat': { setsRange: [3, 5], repOptions: [[3, 5], [5, 8], [8, 12]], style: 'either', dropSet: 'no' },
-  'Hack Squat': { setsRange: [3, 5], repOptions: [[5, 8], [8, 12], [12, 15]], style: 'either', dropSet: 'occasionally' },
-  'Machine Leg Press': { setsRange: [3, 5], repOptions: [[8, 12], [12, 15]], style: 'straight', dropSet: 'occasionally' },
-  'Trap Bar Deadlift': { setsRange: [2, 4], repOptions: [[3, 5], [5, 8], [8, 12]], style: 'either', dropSet: 'no' },
-  'Stiff-Legged Deadlift': { setsRange: [2, 4], repOptions: [[8, 12]], style: 'straight', dropSet: 'no' },
-  'Smith Machine Good Morning': { setsRange: [2, 4], repOptions: [[8, 12], [12, 15]], style: 'straight', dropSet: 'no' },
-  'Cable Pull-Through': { setsRange: [2, 4], repOptions: [[10, 15]], style: 'straight', dropSet: 'occasionally' },
-  'Barbell Bench Press': { setsRange: [3, 5], repOptions: [[5, 8], [8, 12]], style: 'either', dropSet: 'no' },
-  'Barbell Decline Bench Press': { setsRange: [3, 5], repOptions: [[5, 8], [8, 12]], style: 'either', dropSet: 'no' },
-  'Smith Machine Bench Press': { setsRange: [3, 5], repOptions: [[5, 8], [8, 12]], style: 'either', dropSet: 'occasionally' },
-  'Plate-Loaded Incline Chest Press': { setsRange: [3, 5], repOptions: [[5, 8], [8, 12]], style: 'either', dropSet: 'occasionally' },
-  'Dumbbell Bench Press': { setsRange: [3, 5], repOptions: [[5, 8], [8, 12]], style: 'either', dropSet: 'occasionally' },
-  'Low Cable Chest Fly': { setsRange: [2, 4], repOptions: [[10, 15]], style: 'straight', dropSet: 'last_set' },
-  'Machine Chest Fly': { setsRange: [2, 4], repOptions: [[8, 12], [12, 15]], style: 'straight', dropSet: 'last_set' },
-  'Dumbbell Fly': { setsRange: [2, 4], repOptions: [[10, 15]], style: 'straight', dropSet: 'no' },
-  'Seated Barbell Shoulder Press': { setsRange: [3, 5], repOptions: [[5, 8], [8, 12]], style: 'either', dropSet: 'no' },
-  'Barbell Row': { setsRange: [3, 5], repOptions: [[5, 8], [8, 12]], style: 'either', dropSet: 'no' },
-  'Pendlay Row': { setsRange: [2, 4], repOptions: [[3, 5], [5, 8], [8, 12]], style: 'either', dropSet: 'no' },
-  'Cable Row': { setsRange: [3, 5], repOptions: [[8, 12], [12, 15]], style: 'straight', dropSet: 'occasionally' },
-  'Plate-Loaded Chest-Supported Row': { setsRange: [3, 5], repOptions: [[5, 8], [8, 12]], style: 'either', dropSet: 'occasionally' },
-  'Dumbbell Row': { setsRange: [3, 5], repOptions: [[5, 8], [8, 12]], style: 'straight', dropSet: 'no' },
-  'Incline Dumbbell Row': { setsRange: [3, 5], repOptions: [[8, 12], [12, 15]], style: 'straight', dropSet: 'occasionally' },
-  'Weighted Pull-Up': { setsRange: [3, 5], repOptions: [[5, 10]], style: 'straight', dropSet: 'no' },
-  'Pull-Up': { setsRange: [3, 5], repOptions: [[5, 10]], style: 'straight', dropSet: 'no' },
-  'Reverse-Grip Pulldown': { setsRange: [3, 4], repOptions: [[8, 12]], style: 'straight', dropSet: 'occasionally' },
-  'Close-Grip Pulldown': { setsRange: [3, 5], repOptions: [[8, 12], [12, 15]], style: 'straight', dropSet: 'occasionally' },
-  'Cable Face Pull': { setsRange: [2, 4], repOptions: [[12, 15]], style: 'straight', dropSet: 'occasionally' },
-  'Cable Reverse Fly': { setsRange: [2, 5], repOptions: [[12, 15]], style: 'straight', dropSet: 'last_set' },
-  'Weighted Plank': { setsRange: [2, 4], repOptions: [[1, 1]], style: 'straight', dropSet: 'no' },
-  'Machine Back Extension': { setsRange: [2, 4], repOptions: [[8, 15]], style: 'straight', dropSet: 'occasionally' },
-  'Russian Twist': { setsRange: [2, 4], repOptions: [[15, 20]], style: 'straight', dropSet: 'no' },
-  'Plank': { setsRange: [2, 4], repOptions: [[1, 1]], style: 'straight', dropSet: 'no' },
-  'Hanging Knee Raise': { setsRange: [2, 4], repOptions: [[8, 15]], style: 'straight', dropSet: 'no' },
-  'Hanging Leg Raise': { setsRange: [2, 4], repOptions: [[8, 15]], style: 'straight', dropSet: 'no' },
-  'Mountain Climber': { setsRange: [2, 4], repOptions: [[15, 20]], style: 'straight', dropSet: 'no' },
-  'Leg Extension': { setsRange: [2, 5], repOptions: [[10, 15]], style: 'straight', dropSet: 'last_set' },
-  'Machine Adduction': { setsRange: [2, 5], repOptions: [[8, 15]], style: 'straight', dropSet: 'last_set' },
-  'Machine Abduction': { setsRange: [2, 5], repOptions: [[12, 15]], style: 'straight', dropSet: 'last_set' },
-  'Cable Kickback': { setsRange: [2, 4], repOptions: [[12, 15]], style: 'straight', dropSet: 'last_set' },
-  'Dumbbell Lunge': { setsRange: [2, 4], repOptions: [[8, 12], [12, 15]], style: 'straight', dropSet: 'occasionally' },
-  'Calf Raise': { setsRange: [3, 5], repOptions: [[8, 15]], style: 'straight', dropSet: 'last_set' },
-  'Rope Tricep Pushdown': { setsRange: [3, 5], repOptions: [[10, 15], [12, 20]], style: 'straight', dropSet: 'last_set' },
-  'EZ-Bar Skullcrusher': { setsRange: [2, 4], repOptions: [[8, 12], [12, 15]], style: 'straight', dropSet: 'occasionally' },
-  'Single-Arm Dumbbell Tricep Extension': { setsRange: [2, 4], repOptions: [[10, 15]], style: 'straight', dropSet: 'occasionally' },
-  'DB Lateral Raise': { setsRange: [2, 5], repOptions: [[12, 15]], style: 'straight', dropSet: 'last_set' },
-  'Barbell Curl': { setsRange: [2, 4], repOptions: [[8, 12], [12, 15]], style: 'straight', dropSet: 'occasionally' },
-  'EZ-Bar Curl': { setsRange: [2, 4], repOptions: [[8, 12], [12, 15]], style: 'straight', dropSet: 'occasionally' },
-  'Cable Bicep Curl': { setsRange: [3, 5], repOptions: [[8, 12], [10, 15]], style: 'straight', dropSet: 'last_set' },
-  'Cable Double Bicep Curl': { setsRange: [2, 4], repOptions: [[10, 15], [12, 15]], style: 'straight', dropSet: 'last_set' },
-  'Dumbbell Bicep Curl': { setsRange: [2, 4], repOptions: [[8, 12], [12, 15]], style: 'straight', dropSet: 'occasionally' },
-  'Hammer Curl': { setsRange: [2, 4], repOptions: [[8, 12], [12, 15]], style: 'straight', dropSet: 'occasionally' },
-  'Dumbbell Concentration Curl': { setsRange: [2, 4], repOptions: [[10, 15]], style: 'straight', dropSet: 'last_set' }
-};
-function pickRepRange(repOptions, goal) {
-  if (repOptions.length === 1) return repOptions[0];
-  if (goal === 'strength') return repOptions[0];
-  if (goal === 'hypertrophy') return repOptions[repOptions.length - 1];
-  return repOptions[Math.floor(repOptions.length / 2)];
-}
-function pickSetsCount(setsRange, goal) {
-  const [lo, hi] = setsRange;
-  if (goal === 'strength') return lo;
-  if (goal === 'hypertrophy') return hi;
-  return Math.round((lo + hi) / 2);
-}
-function parseRepsRangeStr(str) {
-  const nums = (String(str).match(/\d+/g) || []).map(Number);
-  if (nums.length >= 2) return [nums[0], nums[1]];
-  if (nums.length === 1) return [nums[0], nums[0]];
-  return [8, 12];
-}
-function prescriptionFor(name, goal) {
-  const spec = exerciseSpecs[name];
-  if (!spec) return null;
-  const [repLow, repHigh] = pickRepRange(spec.repOptions, goal);
-  const sets = pickSetsCount(spec.setsRange, goal);
+// The 391-exercise catalog + all fatigue/injury/1RM derivation logic lives in exerciseEngine.js.
+function allCatalogNames() { return exerciseLibrary.map(ex => ex.exercise); }
+function categoryForExerciseName(name) { return libraryExerciseByName(name)?.category || null; }
+const DROP_SET_MAP = { Yes: 'last_set', Optional: 'occasionally', No: 'no' };
+// Every library exercise already carries its own sets/rep range and compound flag, so this always
+// resolves (no exerciseSpecs fallback table needed like the old ~90-exercise pool required).
+function prescriptionFor(libEx, goal) {
+  const sets = goal === 'strength' ? libEx.setsLow : goal === 'hypertrophy' ? libEx.setsHigh : Math.round((libEx.setsLow + libEx.setsHigh) / 2);
   let style = 'straight';
-  if (spec.style === 'either') {
+  if (libEx.isCompound) {
     if (goal === 'strength') style = 'reverse_pyramid'; // heaviest set first, back off from there — best for building a max
     else if (goal === 'hypertrophy') style = 'pyramid'; // ramp up to a top set — adds a intensity peak without going heavy-only
   }
-  return { sets, repLow, repHigh, style, dropSet: spec.dropSet };
+  return { sets, repLow: libEx.repLow, repHigh: libEx.repHigh, style, dropSet: DROP_SET_MAP[libEx.dropSet] || 'no' };
 }
 const SET_SCHEME_LABELS = { straight: 'Straight sets', reverse_pyramid: 'Reverse pyramid', pyramid: 'Pyramid' };
 function nextSetScheme(current) {
@@ -215,14 +117,6 @@ function nextSetScheme(current) {
   return order[(order.indexOf(current) + 1) % order.length];
 }
 function repsDisplay(repLow, repHigh) { return repLow === repHigh ? `${repLow}` : `${repLow}-${repHigh}`; }
-const patternMuscleGroup = {
-  squat: 'legs', hinge: 'legs', legAccessory: 'legs',
-  pushHoriz: 'chest', chestFly: 'chest',
-  pushVert: 'shoulders', rearDelt: 'shoulders',
-  pushAccessory: 'triceps', pullAccessory: 'biceps',
-  pullHoriz: 'back', pullVert: 'back',
-  core: 'core'
-};
 function equivalentReps(targetWeight, targetReps, newWeight) {
   if (!targetWeight || !targetReps || !newWeight) return null;
   const target1RM = targetWeight * (1 + targetReps / 30);
@@ -256,60 +150,7 @@ function buildSetPlan({ sets, repLow, repHigh, style, dropSet, weight, needsWarm
   }
   return plan;
 }
-const compoundPatterns = new Set(['squat', 'hinge', 'pushHoriz', 'pushVert', 'pullHoriz', 'pullVert']);
-const known1RMPatterns = { squat: 'squat', hinge: 'deadlift', pushHoriz: 'bench', pushVert: 'ohp' };
-const primaryExerciseForPattern = { squat: 'Back Squat', hinge: 'Trap Bar Deadlift', pushHoriz: 'Barbell Bench Press', pushVert: 'Seated Barbell Shoulder Press' };
-// Rough starting-point ratios to the 4 tested lifts, for exercises without their own tested 1RM.
-// 'pull' is a derived reference (blend of deadlift + bench) since rows/pulldowns don't map cleanly to either alone.
-const exerciseWeightRatio = {
-  'Front Squat': { ref: 'squat', mult: 0.85 }, 'Hack Squat': { ref: 'squat', mult: 1.3 }, 'Machine Leg Press': { ref: 'squat', mult: 1.8 },
-  'Goblet Squat': { ref: 'squat', mult: 0.35 }, 'DB Bulgarian Split Squat': { ref: 'squat', mult: 0.15 },
-  'Trap Bar Deadlift': { ref: 'deadlift', mult: 1.05 }, 'Stiff-Legged Deadlift': { ref: 'deadlift', mult: 0.7 },
-  'Smith Machine Good Morning': { ref: 'deadlift', mult: 0.35 }, 'Cable Pull-Through': { ref: 'deadlift', mult: 0.3 },
-  'DB Romanian Deadlift': { ref: 'deadlift', mult: 0.15 }, 'Single-Leg DB RDL': { ref: 'deadlift', mult: 0.12 },
-  'Barbell Decline Bench Press': { ref: 'bench', mult: 1.05 }, 'Smith Machine Bench Press': { ref: 'bench', mult: 1.05 },
-  'Plate-Loaded Incline Chest Press': { ref: 'bench', mult: 0.8 }, 'Dumbbell Bench Press': { ref: 'bench', mult: 0.35 }, 'DB Incline Press': { ref: 'bench', mult: 0.3 },
-  'Low Cable Chest Fly': { ref: 'bench', mult: 0.35 }, 'Machine Chest Fly': { ref: 'bench', mult: 0.45 }, 'Dumbbell Fly': { ref: 'bench', mult: 0.15 },
-  'DB Shoulder Press': { ref: 'ohp', mult: 0.35 }, 'Arnold Press': { ref: 'ohp', mult: 0.3 },
-  'Cable Face Pull': { ref: 'ohp', mult: 0.25 }, 'Cable Reverse Fly': { ref: 'ohp', mult: 0.2 }, 'DB Rear Delt Fly': { ref: 'ohp', mult: 0.08 },
-  'Barbell Row': { ref: 'pull', mult: 1.0 }, 'Pendlay Row': { ref: 'pull', mult: 0.95 }, 'Cable Row': { ref: 'pull', mult: 1.0 },
-  'Plate-Loaded Chest-Supported Row': { ref: 'pull', mult: 1.0 }, 'Dumbbell Row': { ref: 'pull', mult: 0.4 }, 'Incline Dumbbell Row': { ref: 'pull', mult: 0.35 },
-  'Reverse-Grip Pulldown': { ref: 'pull', mult: 0.9 }, 'Close-Grip Pulldown': { ref: 'pull', mult: 0.9 }, 'DB Pullover': { ref: 'pull', mult: 0.25 },
-  'Rope Tricep Pushdown': { ref: 'bench', mult: 0.35 }, 'EZ-Bar Skullcrusher': { ref: 'bench', mult: 0.3 }, 'Close-Grip Bench Press': { ref: 'bench', mult: 0.85 },
-  'Single-Arm Dumbbell Tricep Extension': { ref: 'bench', mult: 0.15 }, 'DB Lateral Raise': { ref: 'ohp', mult: 0.08 },
-  'Barbell Curl': { ref: 'pull', mult: 0.35 }, 'EZ-Bar Curl': { ref: 'pull', mult: 0.35 }, 'Cable Bicep Curl': { ref: 'pull', mult: 0.3 },
-  'Cable Double Bicep Curl': { ref: 'pull', mult: 0.3 }, 'Dumbbell Bicep Curl': { ref: 'pull', mult: 0.12 }, 'Hammer Curl': { ref: 'pull', mult: 0.12 },
-  'Dumbbell Concentration Curl': { ref: 'pull', mult: 0.08 },
-  'Leg Extension': { ref: 'squat', mult: 0.5 }, 'Machine Adduction': { ref: 'squat', mult: 0.6 }, 'Machine Abduction': { ref: 'squat', mult: 0.5 },
-  'Cable Kickback': { ref: 'squat', mult: 0.15 }, 'Dumbbell Lunge': { ref: 'squat', mult: 0.15 }, 'Calf Raise': { ref: 'squat', mult: 0.6 }
-};
-function pullReference(oneRMs) {
-  const vals = [oneRMs.deadlift, oneRMs.bench].filter(Boolean);
-  if (!vals.length) return null;
-  return Math.round((vals.reduce((a, b) => a + b, 0) / vals.length) * 0.75);
-}
-function estimateOneRMFor(name, pattern, oneRMs, learnedOneRMs) {
-  if (learnedOneRMs && learnedOneRMs[name]) return { value: learnedOneRMs[name], source: 'learned' };
-  const directKey = known1RMPatterns[pattern];
-  if (directKey && oneRMs[directKey]) return { value: oneRMs[directKey], source: 'direct' };
-  const ratio = exerciseWeightRatio[name];
-  if (ratio) {
-    const refValue = ratio.ref === 'pull' ? pullReference(oneRMs) : oneRMs[ratio.ref];
-    if (refValue) return { value: Math.round(refValue * ratio.mult), source: 'estimated' };
-  }
-  return null;
-}
-const patternAreaMap = {
-  squat: ['Knee', 'Hip', 'Lower back'], hinge: ['Lower back', 'Hamstring'], pushHoriz: ['Shoulder', 'Elbow', 'Wrist'],
-  chestFly: ['Shoulder'], pushVert: ['Shoulder', 'Elbow'], pullHoriz: ['Lower back', 'Shoulder'], pullVert: ['Shoulder', 'Elbow'],
-  rearDelt: ['Shoulder'], core: ['Lower back'], legAccessory: ['Knee', 'Hip', 'Ankle'],
-  pushAccessory: ['Shoulder', 'Elbow'], pullAccessory: ['Elbow', 'Shoulder']
-};
-const exerciseAreaOverride = {
-  Dip: ['Shoulder'], 'Calf Raise': ['Ankle', 'Achilles'], 'DB Lateral Raise': ['Shoulder'], 'Wall Handstand Push-Up': ['Shoulder', 'Wrist'],
-  'Weighted Pull-Up': ['Shoulder', 'Elbow'], 'Pull-Up': ['Shoulder', 'Elbow'], 'Close-Grip Bench Press': ['Elbow', 'Wrist'], 'DB Rear Delt Fly': ['Shoulder']
-};
-function areasForExercise(pattern, name) { return exerciseAreaOverride[name] || patternAreaMap[pattern] || []; }
+function estimateOneRMFor(name, oneRMs, learnedOneRMs) { return estimateOneRMForName(name, oneRMs, learnedOneRMs); }
 
 // Every split cycles its `sequence` continuously across the whole 4-week block via a running cursor
 // (see buildLiftTemplate), so any of these works at any lift-days/week count — the sequence just wraps
@@ -325,33 +166,6 @@ const splitFamilies = {
   arnold: { label: 'Arnold Split', sequence: ['Chest & Back A', 'Shoulders & Arms A', 'Legs A', 'Chest & Back B', 'Shoulders & Arms B', 'Legs B'], recommendedDays: '6' },
   phul: { label: 'Power Hypertrophy Upper Lower (PHUL)', sequence: ['Power Upper', 'Power Lower', 'Hyper Upper', 'Hyper Lower'], recommendedDays: '4' }
 };
-const patternsByDayType = {
-  'Full Body A': ['squat', 'pushHoriz', 'pullHoriz', 'core'],
-  'Full Body B': ['hinge', 'pushVert', 'pullVert', 'pushAccessory'],
-  'Full Body C': ['squat', 'pullHoriz', 'pushVert', 'core'],
-  'Upper A': ['pushHoriz', 'pullHoriz', 'pushVert', 'pullVert', 'pushAccessory'],
-  'Upper B': ['pushVert', 'pullHoriz', 'pushHoriz', 'pullVert', 'pullAccessory'],
-  'Lower A': ['squat', 'hinge', 'legAccessory', 'core'],
-  'Lower B': ['hinge', 'squat', 'legAccessory', 'core'],
-  Push: ['pushHoriz', 'pushVert', 'chestFly', 'pushAccessory'],
-  Pull: ['pullHoriz', 'pullVert', 'rearDelt', 'pullAccessory'],
-  Legs: ['squat', 'hinge', 'legAccessory', 'core'],
-  Chest: ['pushHoriz', 'chestFly', 'pushHoriz'],
-  Back: ['pullHoriz', 'pullVert', 'rearDelt'],
-  Shoulders: ['pushVert', 'rearDelt', 'pushVert'],
-  Arms: ['pushAccessory', 'pullAccessory', 'pushAccessory', 'pullAccessory'],
-  'Chest & Back A': ['pushHoriz', 'pullHoriz', 'chestFly', 'pullVert'],
-  'Chest & Back B': ['pullHoriz', 'pushHoriz', 'pullVert', 'chestFly'],
-  'Shoulders & Arms A': ['pushVert', 'rearDelt', 'pushAccessory', 'pullAccessory'],
-  'Shoulders & Arms B': ['pushVert', 'pushAccessory', 'pullAccessory', 'rearDelt'],
-  'Legs A': ['squat', 'hinge', 'legAccessory', 'core'],
-  'Legs B': ['hinge', 'squat', 'legAccessory', 'core']
-};
-// PHUL reuses Upper/Lower's movement patterns verbatim — only the rep scheme differs (see dayTypeGoalOverride)
-patternsByDayType['Power Upper'] = patternsByDayType['Upper A'];
-patternsByDayType['Power Lower'] = patternsByDayType['Lower A'];
-patternsByDayType['Hyper Upper'] = patternsByDayType['Upper B'];
-patternsByDayType['Hyper Lower'] = patternsByDayType['Lower B'];
 const dayTypeGoalOverride = {
   'Power Upper': 'strength', 'Power Lower': 'strength', 'Hyper Upper': 'hypertrophy', 'Hyper Lower': 'hypertrophy'
 };
@@ -385,38 +199,44 @@ function setRowLabel(ex, si) {
   if (si < warmupOffset + ex.sets) return { label: `Set ${si - warmupOffset + 1}`, color: 'text-zinc-500' };
   return { label: `Drop ${si - warmupOffset - ex.sets + 1}`, color: 'text-amber-500' };
 }
-function buildDayExercises(dayType, seqIndex, { equipment, goal, oneRMs, learnedOneRMs, customExercises }) {
-  const patterns = patternsByDayType[dayType] || patternsByDayType['Full Body A'];
+// Builds one exercise object from a library pick — shared by buildDayExercises and padToTimeBudget
+// so both produce the exact same shape the progression/logging/UI code expects.
+function exerciseFromPick(id, libEx, goal, reasonNote, slotKind, { oneRMs, learnedOneRMs, muscleGroup, needsWarmup }) {
+  const prescription = prescriptionFor(libEx, goal);
   const repScheme = repSchemeFor(goal);
-  const occurrenceByPattern = {};
+  const estimate = estimateOneRMFor(libEx.exercise, oneRMs, learnedOneRMs);
+  const pct1RM = estimate ? +(1 / (1 + prescription.repLow / 30)).toFixed(3) : null;
+  return {
+    id, name: libEx.exercise, pattern: libEx.category, slotKind, isCompound: libEx.isCompound, muscleGroup, needsWarmup,
+    sets: prescription.sets, repLow: prescription.repLow, repHigh: prescription.repHigh, reps: repsDisplay(prescription.repLow, prescription.repHigh),
+    rest: restForStyle(repScheme.rest, prescription.style, prescription.dropSet),
+    style: prescription.style, dropSet: prescription.dropSet,
+    pct1RM, oneRMValue: estimate ? estimate.value : null, weightSource: estimate ? estimate.source : null,
+    loadNote: estimate ? null : 'RPE 7-8 · pick a challenging weight',
+    areas: libEx.areas, reasonNote
+  };
+}
+function buildDayExercises(dayType, seqIndex, { equipment, goal, oneRMs, learnedOneRMs, customExercises, injuryAreas }) {
+  const slots = slotsForDayType(dayType);
+  const usedNames = new Set();
+  const categoryFatigue = new Map();
+  const picks = slots.map((slot, i) => {
+    const picked = selectExerciseForSlot(slot, { equipmentTier: equipment, injuryAreas: injuryAreas || new Set(), usedNames, categoryFatigue, seqIndex, customExercises });
+    usedNames.add(picked.exercise.exercise);
+    bumpFatigue(categoryFatigue, picked.exercise);
+    return { ...picked, slotKind: slot.kind, originalIndex: i };
+  });
+  // Order for display (skill/CNS-demand first, conditioning last) before assigning warmup slots,
+  // so "first touch per muscle group" reflects the order the lifter actually sees, not slot-build order.
+  const orderedExercises = orderDayExercises(picks.map(p => p.exercise));
+  const orderedPicks = orderedExercises.map(ex => picks.find(p => p.exercise === ex));
   const seenMuscleGroups = new Set();
-  return patterns.map((pattern, i) => {
-    const pool = poolFor(pattern, equipment, customExercises);
-    const occurrence = occurrenceByPattern[pattern] || 0;
-    occurrenceByPattern[pattern] = occurrence + 1;
-    const name = pool[(seqIndex + occurrence) % pool.length];
-    const isCompound = compoundPatterns.has(pattern);
-    const prescription = prescriptionFor(name, goal);
-    const sets = prescription ? prescription.sets : (isCompound ? repScheme.compoundSets : repScheme.accessorySets);
-    const [repLow, repHigh] = prescription ? [prescription.repLow, prescription.repHigh] : parseRepsRangeStr(isCompound ? repScheme.compoundReps : repScheme.accessoryReps);
-    const style = prescription ? prescription.style : 'straight';
-    const dropSet = prescription ? prescription.dropSet : 'no';
-    const estimate = estimateOneRMFor(name, pattern, oneRMs, learnedOneRMs);
-    const pct1RM = estimate ? +(1 / (1 + repLow / 30)).toFixed(3) : null;
-    const muscleGroup = patternMuscleGroup[pattern] || pattern;
+  return orderedPicks.map(picked => {
+    const libEx = picked.exercise;
+    const muscleGroup = libEx.category;
     const needsWarmup = !seenMuscleGroups.has(muscleGroup);
     seenMuscleGroups.add(muscleGroup);
-    return {
-      id: `${dayType}-${pattern}-${i}`, name, pattern, isCompound, muscleGroup, needsWarmup,
-      sets, repLow, repHigh, reps: repsDisplay(repLow, repHigh),
-      rest: restForStyle(repScheme.rest, style, dropSet),
-      style, dropSet,
-      pct1RM,
-      oneRMValue: estimate ? estimate.value : null,
-      weightSource: estimate ? estimate.source : null,
-      loadNote: estimate ? null : 'RPE 7-8 · pick a challenging weight',
-      areas: areasForExercise(pattern, name)
-    };
+    return exerciseFromPick(`${dayType}-${picked.slotKind}-${picked.originalIndex}`, libEx, goal, picked.reasonNote, picked.slotKind, { oneRMs, learnedOneRMs, muscleGroup, needsWarmup });
   });
 }
 function estimateSessionMinutes(exercises) {
@@ -445,32 +265,22 @@ function accessoryPatternForDayType(dayType) {
   if (dayType.startsWith('Legs') || dayType.startsWith('Lower')) return 'legAccessory';
   return 'pushAccessory';
 }
-function padToTimeBudget(exercises, targetMinutes, dayType, seqIndex, { equipment, goal, oneRMs, learnedOneRMs, customExercises }) {
+function padToTimeBudget(exercises, targetMinutes, dayType, seqIndex, { equipment, goal, oneRMs, learnedOneRMs, customExercises, injuryAreas }) {
   let list = [...exercises];
-  const repScheme = repSchemeFor(goal);
-  const patternKey = accessoryPatternForDayType(dayType);
+  const slot = slotForKind(accessoryPatternForDayType(dayType));
+  const usedNames = new Set(list.map(e => e.name));
   const seenMuscleGroups = new Set(list.map(e => e.muscleGroup));
+  const categoryFatigue = new Map();
   let guard = 0;
   while (estimateSessionMinutes(list) < targetMinutes - 15 && list.length < 7 && guard < 3) {
-    const pool = poolFor(patternKey, equipment, customExercises);
-    const usedNames = new Set(list.map(e => e.name));
-    const freshName = pool.find(n => !usedNames.has(n));
-    if (!freshName) break;
-    const prescription = prescriptionFor(freshName, goal);
-    const [repLow, repHigh] = prescription ? [prescription.repLow, prescription.repHigh] : parseRepsRangeStr(repScheme.accessoryReps);
-    const muscleGroup = patternMuscleGroup[patternKey] || patternKey;
+    const picked = selectExerciseForSlot(slot, { equipmentTier: equipment, injuryAreas: injuryAreas || new Set(), usedNames, categoryFatigue, seqIndex, customExercises });
+    if (!picked) break;
+    const libEx = picked.exercise;
+    usedNames.add(libEx.exercise);
+    const muscleGroup = libEx.category;
     const needsWarmup = !seenMuscleGroups.has(muscleGroup);
     seenMuscleGroups.add(muscleGroup);
-    const estimate = estimateOneRMFor(freshName, patternKey, oneRMs || {}, learnedOneRMs);
-    const pct1RM = estimate ? +(1 / (1 + repLow / 30)).toFixed(3) : null;
-    list.push({
-      id: `${dayType}-fill-${list.length}`, name: freshName, pattern: patternKey, isCompound: false, muscleGroup, needsWarmup,
-      sets: prescription ? prescription.sets : repScheme.accessorySets, repLow, repHigh, reps: repsDisplay(repLow, repHigh),
-      rest: prescription ? restForStyle(repScheme.rest, prescription.style, prescription.dropSet) : repScheme.rest,
-      style: prescription ? prescription.style : 'straight', dropSet: prescription ? prescription.dropSet : 'no',
-      pct1RM, oneRMValue: estimate ? estimate.value : null, weightSource: estimate ? estimate.source : null,
-      loadNote: estimate ? null : 'RPE 7-8 · pick a challenging weight', areas: areasForExercise(patternKey, freshName)
-    });
+    list.push(exerciseFromPick(`${dayType}-fill-${list.length}`, libEx, goal, picked.reasonNote, slot.kind, { oneRMs: oneRMs || {}, learnedOneRMs, muscleGroup, needsWarmup }));
     guard++;
   }
   return list;
@@ -489,7 +299,7 @@ function recalculateFutureWeights(calendarData, profile, todayStr) {
     days: Object.fromEntries(Object.entries(week.days).map(([wd, entry]) => {
       if (!entry.lift || entry.date <= todayStr) return [wd, entry];
       const exercises = entry.lift.exercises.map(ex => {
-        const estimate = estimateOneRMFor(ex.name, ex.pattern, profile.oneRMs || {}, profile.learnedOneRMs);
+        const estimate = estimateOneRMFor(ex.name, profile.oneRMs || {}, profile.learnedOneRMs);
         if (!estimate) return ex;
         const pct1RM = +(1 / (1 + ex.repLow / 30)).toFixed(3);
         const pctBump = weekIndex < 3 ? weekIndex * 0.025 : -0.05;
@@ -568,17 +378,10 @@ function computeLearnedOneRM(exercise, log) {
   const warmupOffset = exercise.needsWarmup ? 1 : 0;
   return bestOneRMFromSets(log.sets.slice(warmupOffset, warmupOffset + exercise.sets));
 }
-function patternForExerciseName(name) {
-  for (const [pattern, tiers] of Object.entries(exercisePool)) {
-    for (const list of Object.values(tiers)) { if (list.includes(name)) return pattern; }
-  }
-  return null;
-}
 function currentOneRMFor(name, profile, bestHistorical) {
   if (profile.learnedOneRMs && profile.learnedOneRMs[name]) return profile.learnedOneRMs[name];
-  const pattern = patternForExerciseName(name);
-  const directKey = pattern && known1RMPatterns[pattern];
-  if (directKey && primaryExerciseForPattern[pattern] === name && profile.oneRMs && profile.oneRMs[directKey]) return profile.oneRMs[directKey];
+  const directKey = TESTED_LIFT_NAMES[name];
+  if (directKey && profile.oneRMs && profile.oneRMs[directKey]) return profile.oneRMs[directKey];
   return bestHistorical || null;
 }
 function aggregateExerciseStats(logs, profile) {
@@ -1023,7 +826,7 @@ function estimateIndependentLiftCalories(log, profile) {
   let minutes = 0, rpeSum = 0, rpeCount = 0;
   log.independentLift.forEach(entry => {
     const doneSets = (entry.sets || []).filter(s => s.done).length;
-    minutes += doneSets * (compoundPatterns.has(entry.pattern) ? 3.5 : 2);
+    minutes += doneSets * (libraryExerciseByName(entry.name)?.isCompound ? 3.5 : 2);
     if (entry.rpe != null) { rpeSum += entry.rpe; rpeCount++; }
   });
   const avgRpe = rpeCount ? rpeSum / rpeCount : 7;
@@ -1038,6 +841,11 @@ function estimateIndependentRunCalories(log, profile) {
 }
 
 // ---------- plan generation pipeline ----------
+function activeInjuryAreas(injuries) {
+  const areas = new Set();
+  (injuries || []).forEach(inj => { if (inj.status === 'current' || inj.status === 'recurring') areas.add(inj.area); });
+  return areas;
+}
 function buildLiftTemplate(profile, oneRMs) {
   const liftDays = WEEKDAYS.filter(d => profile.schedule[d] === 'lift' || profile.schedule[d] === 'lift_run');
   const family = splitFamilies[profile.splitType] || splitFamilies.full_body;
@@ -1045,6 +853,7 @@ function buildLiftTemplate(profile, oneRMs) {
   const customExercises = profile.customExercises || [];
   const liftDayTypes = profile.liftDayTypes || {};
   const budget = Number(profile.sessionLengthMin) || 60;
+  const injuryAreas = activeInjuryAreas(profile.injuries);
   const template = [];
   let cursor = 0; // advances only for days without a manual override, so the split keeps rotating across weeks instead of repeating
   for (let w = 0; w < 4; w++) {
@@ -1054,9 +863,9 @@ function buildLiftTemplate(profile, oneRMs) {
       if (!override) cursor++;
       const goal = dayTypeGoalOverride[dayType] || profile.strengthGoal;
       const occurrence = w * liftDays.length + i;
-      let exercises = buildDayExercises(dayType, occurrence, { equipment: profile.equipment, goal, oneRMs, learnedOneRMs, customExercises });
+      let exercises = buildDayExercises(dayType, occurrence, { equipment: profile.equipment, goal, oneRMs, learnedOneRMs, customExercises, injuryAreas });
       exercises = trimToTimeBudget(exercises, budget);
-      exercises = padToTimeBudget(exercises, budget, dayType, occurrence, { equipment: profile.equipment, goal, oneRMs, learnedOneRMs, customExercises });
+      exercises = padToTimeBudget(exercises, budget, dayType, occurrence, { equipment: profile.equipment, goal, oneRMs, learnedOneRMs, customExercises, injuryAreas });
       template.push({ week: w, weekday, dayType, exercises });
     });
   }
@@ -1114,23 +923,25 @@ function detectConflicts(liftTemplate, injuries) {
   });
   return conflicts;
 }
-function swapExercise(liftTemplate, weekday, exerciseId, equipment, goal, oneRMs, learnedOneRMs, customExercises) {
+function swapExercise(liftTemplate, weekday, exerciseId, equipment, goal, oneRMs, learnedOneRMs, customExercises, avoidArea) {
   return liftTemplate.map(day => {
     if (day.weekday !== weekday) return day;
     return {
       ...day, exercises: day.exercises.map(ex => {
         if (ex.id !== exerciseId) return ex;
-        const pool = poolFor(ex.pattern, equipment, customExercises);
-        const currentIdx = pool.indexOf(ex.name);
-        const nextName = pool[(currentIdx + 1) % pool.length];
-        const prescription = prescriptionFor(nextName, goal);
-        const repLow = prescription ? prescription.repLow : ex.repLow;
-        const repHigh = prescription ? prescription.repHigh : ex.repHigh;
-        const estimate = estimateOneRMFor(nextName, ex.pattern, oneRMs || {}, learnedOneRMs);
+        const slot = slotForKind(ex.slotKind);
+        const usedNames = new Set([ex.name]);
+        const injuryAreas = avoidArea ? new Set([avoidArea]) : new Set();
+        const picked = selectExerciseForSlot(slot, { equipmentTier: equipment, injuryAreas, usedNames, categoryFatigue: new Map(), seqIndex: Date.now(), customExercises });
+        if (!picked) return ex;
+        const libEx = picked.exercise;
+        const prescription = prescriptionFor(libEx, goal);
+        const repLow = prescription.repLow, repHigh = prescription.repHigh;
+        const estimate = estimateOneRMFor(libEx.exercise, oneRMs || {}, learnedOneRMs);
         return {
-          ...ex, name: nextName, areas: areasForExercise(ex.pattern, nextName),
+          ...ex, name: libEx.exercise, isCompound: libEx.isCompound, areas: libEx.areas, reasonNote: picked.reasonNote,
           repLow, repHigh, reps: repsDisplay(repLow, repHigh),
-          style: prescription ? prescription.style : ex.style, dropSet: prescription ? prescription.dropSet : ex.dropSet,
+          style: prescription.style, dropSet: prescription.dropSet,
           pct1RM: estimate ? +(1 / (1 + repLow / 30)).toFixed(3) : null,
           oneRMValue: estimate ? estimate.value : null, weightSource: estimate ? estimate.source : null,
           loadNote: estimate ? null : 'RPE 7-8 · pick a challenging weight'
@@ -1437,7 +1248,7 @@ function DualWheelPicker({ leftLabel, rightLabel, leftOptions, rightOptions, lef
     </div>
   );
 }
-function emptyIndependentExerciseRow() { return { query: '', name: null, pattern: null, equipment: null, isNew: false, sets: [{ weight: '', reps: '', type: 'working' }], rpe: null, supersetGroup: null }; }
+function emptyIndependentExerciseRow() { return { query: '', name: null, category: null, equipment: null, isNew: false, sets: [{ weight: '', reps: '', type: 'working' }], rpe: null, supersetGroup: null }; }
 const SET_TYPE_LABELS = { working: 'Working', warmup: 'Warm-up', drop: 'Drop' };
 const SUPERSET_COLORS = { A: '#f59e0b', B: '#2dd4bf', C: '#a78bfa', D: '#f472b6' };
 function emptyIndependentLiftDraft() { return { liftExercises: [], liftOverride: 'keep' }; }
@@ -1454,7 +1265,7 @@ function ExerciseCombobox({ row, onChange, customExercises, defaultEquipment }) 
       {row.name ? (
         <div className="flex items-center justify-between bg-zinc-800 border border-zinc-700 rounded px-2 py-1.5">
           <span className="text-sm">{row.name}{row.isNew && <span className="text-[10px] text-teal-400 uppercase ml-1.5">new</span>}</span>
-          <button onClick={() => onChange({ ...row, name: null, pattern: null, isNew: false, query: '' })} className="text-zinc-500"><X size={14} /></button>
+          <button onClick={() => onChange({ ...row, name: null, category: null, isNew: false, query: '' })} className="text-zinc-500"><X size={14} /></button>
         </div>
       ) : (
         <div>
@@ -1467,7 +1278,7 @@ function ExerciseCombobox({ row, onChange, customExercises, defaultEquipment }) 
           {query && (
             <div className="mt-1 space-y-1">
               {matches.map(n => (
-                <button key={n} onClick={() => onChange({ ...row, name: n, pattern: patternForExerciseName(n) || (customExercises || []).find(c => c.name === n)?.pattern || null, isNew: false, query: '' })}
+                <button key={n} onClick={() => onChange({ ...row, name: n, category: categoryForExerciseName(n) || (customExercises || []).find(c => c.name === n)?.category || null, isNew: false, query: '' })}
                   className="w-full text-left px-2 py-1 text-xs bg-zinc-900 border border-zinc-700 rounded hover:bg-zinc-700">{n}</button>
               ))}
               {!exactMatch && (
@@ -1475,10 +1286,10 @@ function ExerciseCombobox({ row, onChange, customExercises, defaultEquipment }) 
                   <p className="text-[11px] text-teal-400">+ Add "{query}" as a new exercise</p>
                   <select defaultValue="" onChange={e => {
                     if (!e.target.value) return;
-                    onChange({ ...row, name: query, pattern: e.target.value, equipment: defaultEquipment, isNew: true, query: '' });
+                    onChange({ ...row, name: query, category: e.target.value, equipment: defaultEquipment, isNew: true, query: '' });
                   }} className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs">
-                    <option value="" disabled>Pick a movement pattern...</option>
-                    {Object.entries(PATTERN_LABELS).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
+                    <option value="" disabled>Pick a category...</option>
+                    {CATEGORIES.map(cat => <option key={cat} value={cat}>{cat.replace(' Exercises', '')}</option>)}
                   </select>
                 </div>
               )}
@@ -1932,14 +1743,13 @@ export default function HybridAthleteApp() {
     // re-sync the learned weight if this exercise was already rated — a set toggle after RPE entry changes what "best set" means
     if (nextExLog.rpe != null) {
       const learned = computeLearnedOneRM(ex, nextExLog);
-      if (learned) applyLearnedOneRM(nextExLog.swappedName || ex.name, ex.pattern, learned);
+      if (learned) applyLearnedOneRM(nextExLog.swappedName || ex.name, learned);
     }
   }
-  function applyLearnedOneRM(name, pattern, learned) {
+  function applyLearnedOneRM(name, learned) {
     const nextLearned = { ...(profile.learnedOneRMs || {}), [name]: learned };
-    const directKey = known1RMPatterns[pattern];
-    const isPrimary = directKey && primaryExerciseForPattern[pattern] === name;
-    const nextOneRMs = isPrimary ? { ...(profile.oneRMs || {}), [directKey]: learned } : profile.oneRMs;
+    const directKey = TESTED_LIFT_NAMES[name];
+    const nextOneRMs = directKey ? { ...(profile.oneRMs || {}), [directKey]: learned } : profile.oneRMs;
     const nextProfile = { ...profile, learnedOneRMs: nextLearned, oneRMs: nextOneRMs };
     setProfile(nextProfile); saveKey('profile', nextProfile);
     const nextCalendar = recalculateFutureWeights(calendar, nextProfile, todayStr);
@@ -2019,7 +1829,7 @@ export default function HybridAthleteApp() {
       setSuggestions(next); saveKey('suggestions', next);
     }
     const learned = computeLearnedOneRM(ex, nextExLog);
-    if (learned) applyLearnedOneRM(exerciseName, ex.pattern, learned);
+    if (learned) applyLearnedOneRM(exerciseName, learned);
 
     if (pendingRpeQueue.includes(ex.id)) {
       const remaining = pendingRpeQueue.filter(id => id !== ex.id);
@@ -2052,20 +1862,17 @@ export default function HybridAthleteApp() {
   }
   function swapToday(exId, ex, currentName) {
     updateDayLog(log => {
-      const pool = poolFor(ex.pattern, profile.equipment, profile.customExercises || []);
-      const idx = pool.indexOf(currentName);
-      const nextName = pool[(idx + 1) % pool.length];
-      const prescription = prescriptionFor(nextName, profile.strengthGoal);
-      const repLow = prescription ? prescription.repLow : ex.repLow;
-      const repHigh = prescription ? prescription.repHigh : ex.repHigh;
-      const style = prescription ? prescription.style : ex.style;
-      const dropSet = prescription ? prescription.dropSet : ex.dropSet;
-      const sets = prescription ? prescription.sets : ex.sets;
-      const estimate = estimateOneRMFor(nextName, ex.pattern, profile.oneRMs || {}, profile.learnedOneRMs);
+      const slot = slotForKind(ex.slotKind);
+      const picked = selectExerciseForSlot(slot, { equipmentTier: profile.equipment, injuryAreas: new Set(), usedNames: new Set([currentName]), categoryFatigue: new Map(), seqIndex: Date.now(), customExercises: profile.customExercises || [] });
+      if (!picked) return log;
+      const libEx = picked.exercise;
+      const prescription = prescriptionFor(libEx, profile.strengthGoal);
+      const { repLow, repHigh, style, dropSet, sets } = prescription;
+      const estimate = estimateOneRMFor(libEx.exercise, profile.oneRMs || {}, profile.learnedOneRMs);
       const weight = estimate ? Math.round((estimate.value * (1 / (1 + repLow / 30))) / 5) * 5 : null;
       const setPlan = buildSetPlan({ sets, repLow, repHigh, style, dropSet, weight, needsWarmup: ex.needsWarmup });
       const newSets = setPlan.map(p => ({ weight: p.targetWeight != null ? String(p.targetWeight) : '', reps: p.targetReps != null ? String(p.targetReps) : '', done: false }));
-      return { ...log, lift: { ...log.lift, [exId]: { swappedName: nextName, sets: newSets, rpe: null, skipped: false } } };
+      return { ...log, lift: { ...log.lift, [exId]: { swappedName: libEx.exercise, sets: newSets, rpe: null, skipped: false } } };
     });
   }
   function toggleSkipExercise(exId) {
@@ -2105,12 +1912,12 @@ export default function HybridAthleteApp() {
       .filter(row => row.name && row.sets.some(s => s.weight && s.reps))
       .map(row => {
         if (row.isNew && !existingNames.has(row.name.toLowerCase())) {
-          newCustom.push({ name: row.name, pattern: row.pattern, equipment: row.equipment || profile.equipment, addedAt: new Date().toISOString() });
+          newCustom.push({ name: row.name, category: row.category, equipmentTier: row.equipment || profile.equipment, addedAt: new Date().toISOString() });
           existingNames.add(row.name.toLowerCase());
         }
         return {
           id: `indep-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-          name: row.name, pattern: row.pattern, supersetGroup: row.supersetGroup || null,
+          name: row.name, category: row.category, supersetGroup: row.supersetGroup || null,
           sets: row.sets.filter(s => s.weight && s.reps).map(s => ({ weight: String(s.weight), reps: String(s.reps), done: true, type: s.type || 'working' })),
           rpe: row.rpe
         };
@@ -2144,9 +1951,8 @@ export default function HybridAthleteApp() {
       if (learned) {
         learnedChanged = true;
         nextLearned[exLog.name] = learned;
-        const directKey = known1RMPatterns[exLog.pattern];
-        const isPrimary = directKey && primaryExerciseForPattern[exLog.pattern] === exLog.name;
-        if (isPrimary) nextOneRMs = { ...(nextOneRMs || {}), [directKey]: learned };
+        const directKey = TESTED_LIFT_NAMES[exLog.name];
+        if (directKey) nextOneRMs = { ...(nextOneRMs || {}), [directKey]: learned };
       }
     });
     if (learnedChanged) nextProfile = { ...nextProfile, learnedOneRMs: nextLearned, oneRMs: nextOneRMs };
@@ -2219,7 +2025,7 @@ export default function HybridAthleteApp() {
     setIndependentLiftDraft(d => ({
       ...d,
       liftExercises: [...d.liftExercises, {
-        query: '', name: exLog.name, pattern: exLog.pattern, equipment: custom?.equipment || profile.equipment, isNew: false,
+        query: '', name: exLog.name, category: exLog.category, equipment: custom?.equipmentTier || profile.equipment, isNew: false,
         sets: exLog.sets.map(s => ({ weight: s.weight, reps: s.reps, type: s.type || 'working' })), rpe: exLog.rpe,
         supersetGroup: exLog.supersetGroup || null
       }]
@@ -2435,7 +2241,7 @@ export default function HybridAthleteApp() {
 
   function resolveConflict(conflict, action) {
     let lt = pendingLiftTemplate;
-    if (action === 'swap') lt = swapExercise(lt, conflict.weekday, conflict.exerciseId, pendingProfile.equipment, pendingProfile.strengthGoal, pendingProfile.oneRMs, pendingProfile.learnedOneRMs, pendingProfile.customExercises || []);
+    if (action === 'swap') lt = swapExercise(lt, conflict.weekday, conflict.exerciseId, pendingProfile.equipment, pendingProfile.strengthGoal, pendingProfile.oneRMs, pendingProfile.learnedOneRMs, pendingProfile.customExercises || [], conflict.area);
     setPendingLiftTemplate(lt);
     setConflicts(conflicts.filter(c => c.id !== conflict.id));
   }
@@ -3713,6 +3519,7 @@ export default function HybridAthleteApp() {
                                           {ex.loadNote && <p className="text-[11px] text-zinc-500">{ex.loadNote}</p>}
                                           {exerciseNote(ex) && <p className="text-[11px] text-amber-500">{exerciseNote(ex)}</p>}
                                           {weightSourceNote(ex) && <p className="text-[11px] text-zinc-500">{weightSourceNote(ex)}</p>}
+                                          {ex.reasonNote && <p className="text-[11px] text-teal-500/80">{ex.reasonNote}</p>}
                                           {log.sets.map((s, si) => {
                                             const rowLabel = setRowLabel(ex, si);
                                             const isLast = si === log.sets.length - 1;
